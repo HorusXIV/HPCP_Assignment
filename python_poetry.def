@@ -1,0 +1,107 @@
+Bootstrap: docker
+From: iterativeai/cml:0-dvc3-base1-gpu
+Stage: build
+
+%environment
+    # General settings
+    export LC_ALL=C
+    export DEBIAN_FRONTEND=noninteractive
+
+    # Default versions (can be overridden)
+    export PYTHON_VERSION=3.12.8
+    export PIP_VERSION=24.3.1
+    export POETRY_VERSION=2.1.1
+
+    # Pip and pipx settings
+    export PIP_ROOT_USER_ACTION=ignore
+    # Set pipx to install executables globally.
+    export PIPX_HOME=/opt/pipx
+    export PIPX_BIN_DIR=/usr/local/bin
+    export PATH="/usr/local/bin:$PATH"
+
+%post
+    # General settings
+    export LC_ALL=C
+    export DEBIAN_FRONTEND=noninteractive
+
+    # Default versions (can be overridden)
+    export PYTHON_VERSION=${PYTHON_VERSION:-3.12.8}
+    export PIP_VERSION=${PIP_VERSION:-24.3.1}
+    export POETRY_VERSION=${POETRY_VERSION:-2.1.1}
+
+    # Pip and pipx settings
+    export PIP_ROOT_USER_ACTION=ignore
+    export PIPX_HOME=/opt/pipx
+    export PIPX_BIN_DIR=/usr/local/bin
+    export PATH="/usr/local/bin:$PATH"
+
+
+    # Prepare package sources and add extra repositories.
+    apt-get update -y
+    apt-get install -y --no-install-recommends software-properties-common
+    add-apt-repository universe
+    add-apt-repository multiverse
+    apt-get update -y
+
+    # Install required packages including build dependencies for Python.
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        jq \
+        git \
+        libcurl4-openssl-dev \
+        build-essential \
+        libssl-dev \
+        zlib1g-dev \
+        libncurses5-dev \
+        libncursesw5-dev \
+        libreadline-dev \
+        libsqlite3-dev \
+        libgdbm-dev \
+        libdb5.3-dev \
+        libbz2-dev \
+        libexpat1-dev \
+        liblzma-dev \
+        tk-dev \
+        wget
+
+    # Rename the preinstalled python3 (old binary is preserved).
+    if [ -f /usr/bin/python3 ]; then
+        mv /usr/bin/python3 /usr/bin/python3.old
+    fi
+
+    # Download, build, and install Python from source.
+    mkdir -p /tmp_build
+    cd /tmp_build
+    curl -O https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tgz
+    tar -xf Python-${PYTHON_VERSION}.tgz
+    cd Python-${PYTHON_VERSION}
+    ./configure --enable-optimizations
+    make -j$(nproc)
+    make altinstall
+
+    # Replace the default python3 and python symlinks with the new Python.
+    ln -sf /usr/local/bin/python${PYTHON_VERSION%.*} /usr/bin/python3
+    if [ -f /usr/bin/python ]; then
+        mv /usr/bin/python /usr/bin/python.old
+    fi
+    ln -sf /usr/local/bin/python${PYTHON_VERSION%.*} /usr/bin/python
+
+    # Verify the installed Python version.
+    python3 --version
+    python --version
+
+    # Upgrade setuptools and pip using the new Python.
+    python3 -m pip install --upgrade setuptools
+    python3 -m pip install --upgrade pip==${PIP_VERSION}
+
+
+    # Install pipx and configure it for global binary installation.
+    python3 -m pip install pipx
+    # pipx now uses the global directories as set above.
+    pipx install "poetry==${POETRY_VERSION}"
+    # Now that poetry is available in /usr/local/bin, add the plugin.
+    poetry self add poetry-plugin-shell
+
+    NOW=$(date)
+    echo "export NOW=\"${NOW}\"" >> $SINGULARITY_ENVIRONMENT
