@@ -1,0 +1,70 @@
+name: CI (Poetry)
+
+on:
+  push:            # run on every push (any branch)
+    branches: ["**"]
+  pull_request:    # and on PRs targeting main
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-test:
+    # If your self-hosted runner has custom labels (e.g. linux, arm64, rpi4),
+    # you can use: runs-on: [self-hosted, linux, arm64]
+    runs-on: mypi
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: 1.7.1
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+
+      - name: Cache virtualenv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ hashFiles('**/poetry.lock') }}
+          restore-keys: |
+            venv-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          poetry install --no-interaction --no-ansi
+
+      - name: Lint
+        run: |
+          # Prefer ruff if present; fall back to flake8
+          if poetry run ruff --version >/dev/null 2>&1; then
+            poetry run ruff check .
+          elif poetry run flake8 --version >/dev/null 2>&1; then
+            poetry run flake8 .
+          else
+            echo "No linter found. Add 'ruff' or 'flake8' to dev-dependencies."
+            exit 1
+          fi
+
+      - name: Run tests
+        run: |
+          if poetry run pytest --version >/dev/null 2>&1; then
+            poetry run pytest -q
+          else
+            echo "pytest not found. Add 'pytest' to dev-dependencies."
+            exit 1
+          fi
