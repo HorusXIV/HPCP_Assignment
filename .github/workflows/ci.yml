@@ -17,7 +17,7 @@ jobs:
   lint-and-test:
     runs-on: self-hosted
 
-    # Run steps inside an ARM64 Python image (works great on Raspberry Pi with Docker)
+    # Run steps inside an ARM64-capable Python 3.12 image
     container:
       image: python:3.12-slim
       options: --cpus=2 --memory=2g
@@ -27,11 +27,6 @@ jobs:
     steps:
       - name: Check out
         uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
 
       - name: Install Poetry
         uses: snok/install-poetry@v1
@@ -50,11 +45,12 @@ jobs:
 
       - name: Install dependencies
         run: |
+          poetry --version
+          python --version
           poetry install --no-interaction --no-ansi
 
       - name: Lint
         run: |
-          # Prefer ruff if present; fall back to flake8
           if poetry run ruff --version >/dev/null 2>&1; then
             poetry run ruff check .
           elif poetry run flake8 --version >/dev/null 2>&1; then
