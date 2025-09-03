@@ -1,9 +1,9 @@
 name: CI (Poetry)
 
 on:
-  push:            # run on every push (any branch)
+  push:
     branches: ["**"]
-  pull_request:    # and on PRs targeting main
+  pull_request:
     branches: ["main"]
 
 permissions:
@@ -17,7 +17,6 @@ jobs:
   lint-and-test:
     runs-on: self-hosted
 
-    # Run steps inside an ARM64-capable Python 3.12 image
     container:
       image: python:3.12-slim
       options: --cpus=2 --memory=2g
@@ -28,12 +27,24 @@ jobs:
       - name: Check out
         uses: actions/checkout@v4
 
+      # Python comes from the container; do NOT use setup-python here.
+
+      - name: Install OS deps (optional but handy for builds)
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git build-essential
+          rm -rf /var/lib/apt/lists/*
+
       - name: Install Poetry
         uses: snok/install-poetry@v1
         with:
           version: 1.7.1
           virtualenvs-create: true
           virtualenvs-in-project: true
+
+      # Ensure the poetry bin dir is on PATH inside the container shell
+      - name: Ensure Poetry on PATH
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Cache virtualenv
         uses: actions/cache@v4
@@ -45,6 +56,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+          which poetry || true
           poetry --version
           python --version
           poetry install --no-interaction --no-ansi
