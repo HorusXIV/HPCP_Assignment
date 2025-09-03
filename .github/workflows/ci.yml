@@ -37,10 +37,6 @@ jobs:
           poetry config virtualenvs.create true
           poetry config virtualenvs.in-project true
 
-      - name: Ensure Poetry on PATH
-        shell: bash
-        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
       - name: Cache virtualenv
         uses: actions/cache@v4
         with:
@@ -51,7 +47,6 @@ jobs:
 
       - name: Install dependencies
         run: |
-          command -v poetry
           poetry --version
           python --version
           poetry install --no-interaction --no-ansi
