@@ -8,6 +8,12 @@ authors = [
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "dask (>=2025.7.0,<2026.0.0)",
+    "notebook (>=7.4.5,<8.0.0)",
+    "numba (>=0.61.2,<0.62.0)",
+    "numba-cuda (>=0.19.1,<0.20.0)",
+    "scikit-learn (>=1.7.1,<2.0.0)",
+    "ipykernel (>=6.30.1,<7.0.0)"
 ]
 
 [tool.poetry]
