@@ -17,7 +17,7 @@ jobs:
   lint-and-test:
     # If your self-hosted runner has custom labels (e.g. linux, arm64, rpi4),
     # you can use: runs-on: [self-hosted, linux, arm64]
-    runs-on: mypi
+    runs-on: self-hosted
     timeout-minutes: 30
 
     steps:
