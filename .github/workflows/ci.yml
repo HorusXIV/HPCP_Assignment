@@ -15,9 +15,13 @@ concurrency:
 
 jobs:
   lint-and-test:
-    # If your self-hosted runner has custom labels (e.g. linux, arm64, rpi4),
-    # you can use: runs-on: [self-hosted, linux, arm64]
     runs-on: self-hosted
+
+    # Run steps inside an ARM64 Python image (works great on Raspberry Pi with Docker)
+    container:
+      image: python:3.12-slim
+      options: --cpus=2 --memory=2g
+
     timeout-minutes: 30
 
     steps:
