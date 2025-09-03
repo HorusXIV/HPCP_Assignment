@@ -1,0 +1,57 @@
+name: CI (Poetry)
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-test:
+    runs-on: self-hosted
+
+    container:
+      image: python:3.12-slim
+      options: --cpus=2 --memory=2g
+
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+
+      - name: Install dependencies
+        run: |
+          poetry --version
+          python --version
+          poetry install --no-interaction --no-ansi
+
+      - name: Lint
+        run: |
+          if poetry run ruff --version >/dev/null 2>&1; then
+            poetry run ruff check .
+          elif poetry run flake8 --version >/dev/null 2>&1; then
+            poetry run flake8 .
+          else
+            echo "No linter found. Add 'ruff' or 'flake8' to dev-deps."
+            exit 1
+          fi
+
+      - name: Run tests
+        run: |
+          if poetry run pytest --version >/dev/null 2>&1; then
+            poetry run pytest -q
+          else
+            echo "pytest not found. Add 'pytest' to dev-deps."
+            exit 1
+          fi
