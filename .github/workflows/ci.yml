@@ -27,14 +27,6 @@ jobs:
       - name: Check out
         uses: actions/checkout@v4
 
-      # Python comes from the container; do NOT use setup-python here.
-
-      - name: Install OS deps (optional but handy for builds)
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends git build-essential
-          rm -rf /var/lib/apt/lists/*
-
       - name: Install Poetry
         uses: snok/install-poetry@v1
         with:
@@ -42,8 +34,8 @@ jobs:
           virtualenvs-create: true
           virtualenvs-in-project: true
 
-      # Ensure the poetry bin dir is on PATH inside the container shell
       - name: Ensure Poetry on PATH
+        shell: bash
         run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Cache virtualenv
@@ -56,7 +48,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          which poetry || true
+          command -v poetry
           poetry --version
           python --version
           poetry install --no-interaction --no-ansi
@@ -68,7 +60,7 @@ jobs:
           elif poetry run flake8 --version >/dev/null 2>&1; then
             poetry run flake8 .
           else
-            echo "No linter found. Add 'ruff' or 'flake8' to dev-dependencies."
+            echo "No linter found. Add 'ruff' or 'flake8' to dev-deps."
             exit 1
           fi
 
@@ -77,6 +69,6 @@ jobs:
           if poetry run pytest --version >/dev/null 2>&1; then
             poetry run pytest -q
           else
-            echo "pytest not found. Add 'pytest' to dev-dependencies."
+            echo "pytest not found. Add 'pytest' to dev-deps."
             exit 1
           fi
