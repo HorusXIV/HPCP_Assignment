@@ -107,14 +107,10 @@ This repo includes:
 
 ### Build the Singularity image
 
-Pick the method your site supports:
+We have to run the command using srun since we work on the FHNW SLURM.
 
 ```bash
-# With local root
-singularity build containers/python_poetry.sif containers/python_poetry.def
-
-# Or fakeroot (if enabled)
-singularity build --fakeroot containers/python_poetry.sif containers/python_poetry.def
+srun - p perfromance singularity build --fakeroot containers/python_poetry.sif containers/python_poetry.def
 ```
 
 ### Run on Slurm
