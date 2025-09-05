@@ -9,8 +9,8 @@ Stage: build
 
     # Default versions (can be overridden)
     export PYTHON_VERSION=3.12.8
-    export PIP_VERSION=24.3.1
-    export POETRY_VERSION=2.1.1
+    export PIP_VERSION=25.2
+    export POETRY_VERSION=2.1.4
 
     # Pip and pipx settings
     export PIP_ROOT_USER_ACTION=ignore
