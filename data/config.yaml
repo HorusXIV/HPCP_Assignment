@@ -1,0 +1,66 @@
+# -------- RUN WINDOW (used by downloader) --------
+time_start: "2017-09-06 12:00:00"
+time_end:   "2017-09-06 12:04:00"
+cadence_s:  12
+wavelengths: [94, 131, 171, 193, 211, 335]   # Å
+
+# -------- PATHS --------
+paths:
+  raw_dir: raw
+  manifest: raw_manifest.csv
+  fits_dir: fits
+  fits_compressed_dir: fits_compressed
+  np32_dir: np32
+  np16_dir: np16
+  np8_dir:  np8
+  zarr_dir: zarr
+  hdf5_dir: hdf5
+  raw_path_template: "raw/{file}"   # optional but nice
+
+
+# -------- NETWORKING (downloader) --------
+network:
+  window_minutes: 10
+  parallel_connections: 2
+  file_timeout_s: 240
+  retry_attempts: 6
+  bands_in_parallel: 6
+
+# -------- PIPELINE SWITCHES --------
+pipeline:
+  download_raw: true
+  use_manifest: true
+  strict_manifest: false
+  require_complete_bandset: true
+
+# -------- FITS (calibrated) --------
+fits:
+  enabled: true
+  write_compressed: false        # if true -> write to fits_compressed_dir with .fits.fz
+  quantize_level: 32             # only used when write_compressed = true
+  threads: auto                  # "auto" or int
+
+# -------- NumPy stacks (raw) --------
+numpy:
+  enabled: true
+  quantize_bits: 32              # 32 | 16 | 8
+  quant_strategy: "p99"          # "p99" | "max"
+  threads: auto
+
+# -------- Zarr (raw) --------
+zarr:
+  enabled: true
+  dataset: "aia"                 # name inside the Zarr store
+  store_name: "aia_raw_6bands.zarr"
+  chunks: [1, 6, 512, 512]       # (time, band, y, x)
+  compressor: "zstd"             # for zarr v2 via numcodecs.Blosc
+  clevel: 6
+
+# -------- HDF5 (raw) --------
+hdf5:
+  enabled: true
+  file_name: "aia_raw_6bands.h5"
+  dataset: "aia"                 # name inside the HDF5 file
+  chunks: [1, 6, 512, 512]
+  compression: "gzip"            # "gzip" | "lzf" | null
+  compression_level: 4
