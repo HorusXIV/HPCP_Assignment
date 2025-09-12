@@ -55,12 +55,12 @@ While a full hour was initially downloaded, it was found computationally excessi
 ## 4. Processing pipeline
 
 ```mermaid
-flowchart TD
-    A[Raw FITS (SDO/AIA)] -->|download.py| B[raw/ folder]
-    B -->|raw_manifest.csv| C[Manifest]
-    B -->|raw_to_np.py| D[np32/ NPZ stacks]
-    C -->|guides grouping| D
-    D -->|used for HPC tasks| E[DEM inversion & analysis]
+graph TD
+  A[Raw FITS SDO AIA] -->|download.py| B{raw}
+  B -->|raw_to_np.py| C[np32 np16 np8]
+  C --> D[HPC analysis]
+  B -->|optional| E[unused formats hdf5 zarr movie fits]
+  E --> F[for reference only]
 ```
 
 ---
