@@ -1,0 +1,24 @@
+{
+  "name": "np32",
+  "title": "hpcp_np32_stacks",
+  "doi": "10.5281/zenodo.17114359",
+  "record_id": "17114359",
+  "filename": "np32.zip",
+  "size_bytes": 875624366,
+  "checksums": {
+    "md5": "505eec8373f356384b85539fbe32e474",
+    "sha256": "7C0CEBE30E68DA4455CFBA0D86941556B47BA3A06BCA1B15C08C2DA948981D02"
+  },
+  "urls": {
+    "record_html": "https://zenodo.org/records/17114359",
+    "record_api": "https://zenodo.org/api/records/17114359",
+    "file_download": "https://zenodo.org/records/17114359/files/np32.zip?download=1",
+    "file_api_content": "https://zenodo.org/api/records/17114359/files/np32.zip/content"
+  },
+  "license": {
+    "id": "cc-by-4.0",
+    "url": "https://creativecommons.org/licenses/by/4.0/"
+  },
+  "publisher": "Zenodo",
+  "created": "2025-09-13"
+}
