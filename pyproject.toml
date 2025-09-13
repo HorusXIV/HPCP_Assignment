@@ -1,30 +1,61 @@
-[project]
+[tool.poetry]
 name = "hpcp-assignment"
 version = "0.1.0"
 description = ""
 authors = [
-    {name = "Lukas Breiter",email = "lukas.breiter@students.fhnw.ch"},
-    {name = "Christoph Elmiger",email = "christoph.elmiger@students.fhnw.ch"},
-    {name = "Mikaela Buzdin",email = "mikaela.buzdin@students.fhnw.ch"}
+  "Lukas Breiter <lukas.breiter@students.fhnw.ch>",
+  "Christoph Elmiger <christoph.elmiger@students.fhnw.ch>",
+  "Mikaela Buzdin <mikaela.buzdin@students.fhnw.ch>",
 ]
 readme = "README.md"
-requires-python = ">=3.12"
-dependencies = [
-    "dask (>=2025.7.0,<2026.0.0)",
-    "notebook (>=7.4.5,<8.0.0)",
-    "numba (>=0.61.2,<0.62.0)",
-    "numba-cuda (>=0.19.1,<0.20.0)",
-    "scikit-learn (>=1.7.1,<2.0.0)",
-    "ipykernel (>=6.30.1,<7.0.0)"
-]
-
-[tool.poetry]
 package-mode = false
+# constrain if you want: python = ">=3.12,<3.13"
+
+[tool.poetry.dependencies]
+python = ">=3.12"
+numpy = "<2.3"
+threadpoolctl = "^3.6.0"
+tqdm = "^4.67.1"
+pyyaml = "^6.0.2"
+dask = { version = "^2025.9.0", extras = ["distributed"] }
+numba = "^0.61.2"
+numba-cuda = "^0.19.1"
+scikit-learn = "^1.7.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.4.1"
 black = "^25.1.0"
 ruff = "^0.12.11"
+line-profiler = "^5.0.0"
+
+[tool.poetry.group.notebooks.dependencies]
+notebook = ">=7.4.5,<8.0.0"
+ipykernel = ">=6.30.1,<7.0.0"
+ipywidgets = "^8.1.7"
+matplotlib = "^3.10.6"
+mpl-animators = ">=1.2.0"
+
+[tool.poetry.group.data.dependencies]
+pandas = "^2.3.2"
+xarray = "^2025.9.0"
+zarr = "^3.1.2"
+numcodecs = "^0.16.2"
+h5py = "^3.14.0"
+lxml = "^6.0.1"
+zeep = "^4.3.1"
+drms = "^0.9.0"
+reproject = "^0.15.0"
+astropy = "^7.1.0"
+sunpy = "^7.0.1"
+aiapy = "^0.10.1"
+sunkit-instruments = "^0.6.2"
+chiantipy = "^0.15.2"
+
+[tool.poetry.scripts]
+baseline  = "src.baseline.main:main"
+dask      = "src.Dask.main:main"
+singlegpu = "src.singleGPU.main:main"
+multigpu  = "src.multiGPU.main:main"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
