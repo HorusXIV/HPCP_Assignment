@@ -7,7 +7,6 @@ from typing import Iterable, List, Optional, Tuple, Callable
 import numpy as np
 
 # --- Import the provided solver + internals (baseline/vendor) ---
-# Adjust the import path if your package root differs.
 from src.baseline.vendor.dn2dem_pos import dn2dem_pos
 from src.baseline.vendor.demmap_pos import demmap_pos as _demmap_pos, dem_pix as _dem_pix
 
@@ -273,12 +272,14 @@ def run_baseline_suite(
     dtype: np.dtype = np.float32,
     outdir: Path | str = "benchmark_out",
     solver_fn: Callable = dn2dem_pos,
+    force_single_thread: bool = False,
 ) -> dict:
     """
     Runs env snapshot, wall-clock bench, cProfile, and line_profiler in one go.
     Returns dict of output paths/rows.
     """
-    set_single_thread_caps()
+    if force_single_thread:
+        set_single_thread_caps()
     env_path = write_env_snapshot(STACK, T_RESP, T_RESP_LOGT, TEMPS, outdir=outdir)
     rows = benchmark_wallclock(STACK, T_RESP, T_RESP_LOGT, TEMPS, sizes=sizes, repeats=repeats,
                                nmu=nmu, dtype=dtype, outdir=outdir, solver_fn=solver_fn)
@@ -295,3 +296,29 @@ def run_baseline_suite(
         "lineprof_txt": ltxt,
         "outdir": str(Path(outdir).resolve()),
     }
+
+
+# ----------------------------
+# Lightweight cross-module bench sink
+# ----------------------------
+_BENCH_OUTDIR = Path(os.environ.get("BENCH_OUTDIR", "benchmark_out"))
+
+def set_bench_outdir(path: str | Path) -> None:
+    """Set the output directory for bench_row CSV."""
+    global _BENCH_OUTDIR
+    _BENCH_OUTDIR = Path(path)
+    _BENCH_OUTDIR.mkdir(parents=True, exist_ok=True)
+
+def bench_row(**kw) -> None:
+    """
+    Minimal CSV logger used by Dask runner (and others).
+    Writes to <outdir>/profiling_dask.csv; outdir can be set via set_bench_outdir or BENCH_OUTDIR env.
+    """
+    _BENCH_OUTDIR.mkdir(parents=True, exist_ok=True)
+    path = _BENCH_OUTDIR / "profiling_dask.csv"
+    header_needed = not path.exists()
+    with path.open("a", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=sorted(kw.keys()))
+        if header_needed:
+            w.writeheader()
+        w.writerow(kw)

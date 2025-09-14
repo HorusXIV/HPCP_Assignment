@@ -8,8 +8,9 @@ authors = [
   "Mikaela Buzdin <mikaela.buzdin@students.fhnw.ch>",
 ]
 readme = "README.md"
-package-mode = false
-# constrain if you want: python = ">=3.12,<3.13"
+
+[[tool.poetry.packages]]
+include = "src"
 
 [tool.poetry.dependencies]
 python = ">=3.12"
@@ -19,8 +20,9 @@ tqdm = "^4.67.1"
 pyyaml = "^6.0.2"
 dask = { version = "^2025.9.0", extras = ["distributed"] }
 numba = "^0.61.2"
-numba-cuda = "^0.19.1"
 scikit-learn = "^1.7.1"
+# Optional GPU bits (uncomment and pick the right CUDA build)
+# cupy-cuda12x = { version = "^13.3.0", optional = true }
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.4.1"
@@ -52,10 +54,10 @@ sunkit-instruments = "^0.6.2"
 chiantipy = "^0.15.2"
 
 [tool.poetry.scripts]
-baseline  = "src.baseline.main:main"
-dask      = "src.Dask.main:main"
-singlegpu = "src.singleGPU.main:main"
-multigpu  = "src.multiGPU.main:main"
+hpcp-baseline  = "src.baseline.main:main"
+hpcp-dask      = "src.dask.main:main"
+hpcp-singlegpu = "src.singlegpu.main:main"
+hpcp-multigpu  = "src.multigpu.main:main"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
