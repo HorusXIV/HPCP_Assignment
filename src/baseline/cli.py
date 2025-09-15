@@ -8,7 +8,7 @@ def parse_args():
     ap.add_argument("--sizes", type=str, default="14,64,256,1024") #,2048,4096
     ap.add_argument("--repeats", type=int, default=5)
     ap.add_argument("--nmu", type=int, default=42)
-    ap.add_argument("--outdir", type=str, default="benchmark_out")
+    ap.add_argument("--outdir", type=str, default="baseline/benchmark_out")
     ap.add_argument("--data-dir", type=str, default=None)
     ap.add_argument("--ext", type=str, default="*.npz")
     ap.add_argument("--idx", type=str, default="-1")

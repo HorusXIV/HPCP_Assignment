@@ -311,7 +311,7 @@ def set_bench_outdir(path: str | Path) -> None:
 
 def bench_row(**kw) -> None:
     """
-    Minimal CSV logger used by Dask runner (and others).
+    Minimal CSV logger used by dask runner (and others).
     Writes to <outdir>/profiling_dask.csv; outdir can be set via set_bench_outdir or BENCH_OUTDIR env.
     """
     _BENCH_OUTDIR.mkdir(parents=True, exist_ok=True)

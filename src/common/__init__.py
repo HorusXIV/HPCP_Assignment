@@ -1,5 +1,5 @@
 """
-Common utilities shared across CPU/GPU/Dask variants.
+Common utilities shared across CPU/GPU/dask variants.
 
 Typical imports:
     from src.common import load_np_stack, prepare_synthetic_responses

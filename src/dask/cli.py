@@ -2,7 +2,7 @@ from __future__ import annotations
 import argparse
 
 def parse_args():
-    ap = argparse.ArgumentParser("Dask DEM runner")
+    ap = argparse.ArgumentParser("dask DEM runner")
     # dataset / sizing
     ap.add_argument("--use-synthetic", action="store_true", default=False)
     ap.add_argument("--data-dir", type=str, default=None)
@@ -12,7 +12,7 @@ def parse_args():
     ap.add_argument("--tile", type=str, default="128,128", help="tile_h,tile_w (default 128,128)")
     ap.add_argument("--repeats", type=int, default=1, help="How many times to repeat benchmark run")
     ap.add_argument("--nmu", type=int, default=42)
-    ap.add_argument("--outdir", type=str, default="benchmark_out")
+    ap.add_argument("--outdir", type=str, default="dask/benchmark_out")
 
     # cluster / scheduler
     ap.add_argument("--scheduler", type=str, default=None,

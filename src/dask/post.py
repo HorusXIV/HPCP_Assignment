@@ -1,4 +1,4 @@
-# src/Dask/post.py
+# src/dask/post.py
 from __future__ import annotations
 import dask.array as da
 import numpy as np
@@ -6,7 +6,7 @@ from src.common.post import dem_to_temp_maps
 
 def dem_to_temp_maps_blocks(dem_dask: da.Array, logT_bins: np.ndarray):
     """
-    dem_dask: (N, H, W, nt) -> returns two Dask arrays:
+    dem_dask: (N, H, W, nt) -> returns two dask arrays:
       mean_logT (N,H,W), peak_logT (N,H,W)
     """
     nt = dem_dask.shape[-1]
