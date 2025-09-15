@@ -78,7 +78,7 @@ poetry env activate
 # Run one of the entry points locally
 poetry run python src/singleGPU/main.py
 poetry run python src/multiGPU/main.py
-poetry run python src/Dask/main.py
+poetry run python src/dask/main.py
 ```
 
 ---
@@ -144,7 +144,7 @@ sbatch hpc/slurm_run_singleGPU.sh
 # Multi-GPU
 sbatch hpc/slurm_run_multiGPU.sh
 
-# Dask workload
+# dask workload
 sbatch hpc/slurm_run_Dask.sh
 ```
 

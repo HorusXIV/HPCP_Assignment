@@ -45,7 +45,7 @@ def _tune_worker_memory(
     terminate: float = 0.95,
 ):
     """
-    Configure Dask worker memory thresholds *on the worker*.
+    Configure dask worker memory thresholds *on the worker*.
 
     target     -> start spilling/evicting to keep managed memory under this fraction
     spill      -> threshold to start spilling to disk
@@ -183,7 +183,7 @@ def run_dask_suite(
     outdir: str = "benchmark_out",
 ) -> dict:
     """
-    Build the Dask graph once using src.dask.tiling.dem_map_blocks and benchmark it.
+    Build the dask graph once using src.dask.tiling.dem_map_blocks and benchmark it.
 
     Memory-safety measures:
       - per-worker memory thresholds tuned (spill earlier, pause before OOM)

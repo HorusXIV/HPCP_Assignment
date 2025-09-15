@@ -1,4 +1,4 @@
-# src/Dask/client.py
+# src/dask/client.py
 from __future__ import annotations
 from contextlib import contextmanager
 from typing import Optional

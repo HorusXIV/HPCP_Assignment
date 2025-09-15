@@ -1,5 +1,5 @@
 """
-Dask execution helpers: client creation, tiling, and distributed benchmarks.
+dask execution helpers: client creation, tiling, and distributed benchmarks.
 """
 from .client import build_client
 from .tiling import dem_map_blocks
