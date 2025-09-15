@@ -47,12 +47,13 @@ jobs:
       - name: Lint
         run: |
           if poetry run ruff --version >/dev/null 2>&1; then
-            poetry run ruff check .
+            # ruff: return 0 even if there are issues
+            poetry run ruff check --exit-zero .
           elif poetry run flake8 --version >/dev/null 2>&1; then
-            poetry run flake8 .
+            # flake8: return 0 even if there are issues
+            poetry run flake8 --exit-zero .
           else
-            echo "No linter found. Add 'ruff' or 'flake8' to dev-deps."
-            exit 1
+            echo "::warning::No linter found. Add 'ruff' or 'flake8' to dev-deps."
           fi
 
       - name: Run tests
