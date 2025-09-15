@@ -14,7 +14,7 @@ REPO_DIR="${REPO_DIR:-$SLURM_SUBMIT_DIR}"
 IMAGE="${IMAGE:-$REPO_DIR/containers/python_poetry.sif}"
 
 
-ENTRY="${ENTRY:-src/multiGPU/main.py}"
+ENTRY="${ENTRY:-src.multiGPU.main}"
 
 echo "[SLURM] Using image: $IMAGE"
 echo "[SLURM] Repo dir:   $REPO_DIR"
@@ -29,5 +29,5 @@ singularity exec --cleanenv --nv \
     set -euo pipefail
     cd /workspace
     poetry install --no-interaction --no-ansi
-    poetry run python \"$ENTRY\"
+    poetry run python -m \"$ENTRY\"
 "
