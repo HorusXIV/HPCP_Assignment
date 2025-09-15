@@ -1,4 +1,3 @@
-# src/common/profiling.py
 from __future__ import annotations
 import os, sys, json, time, platform, statistics as stats, csv, io
 from pathlib import Path
@@ -59,7 +58,7 @@ def time_one(
 ) -> Tuple[float, float]:
     """Run once and return (elapsed_seconds, DEMs_per_second)."""
     t0 = time.perf_counter()
-    _ = run_dn2dem(frame_6hw, T_RESP, T_RESP_LOGT, TEMPS, nmu=nmu, dtype=dtype, solver_fn=solver_fn)
+    _ = run_dn2dem(frame, T_RESP, T_RESP_LOGT, TEMPS, nmu=nmu, dtype=dtype, solver_fn=solver_fn) if (frame := frame_6hw) is not None else None
     dt = time.perf_counter() - t0
     H, W = frame_6hw.shape[1], frame_6hw.shape[2]
     return dt, (H * W) / dt
@@ -304,21 +303,39 @@ def run_baseline_suite(
 _BENCH_OUTDIR = Path(os.environ.get("BENCH_OUTDIR", "benchmark_out"))
 
 def set_bench_outdir(path: str | Path) -> None:
-    """Set the output directory for bench_row CSV."""
+    """
+    Set the output directory for bench CSVs. This directory will contain:
+      - bench.csv                : human-friendly CSV with one row per run
+      - profiling_dask.csv       : same row, legacy filename kept for compatibility
+    """
     global _BENCH_OUTDIR
     _BENCH_OUTDIR = Path(path)
     _BENCH_OUTDIR.mkdir(parents=True, exist_ok=True)
 
-def bench_row(**kw) -> None:
-    """
-    Minimal CSV logger used by dask runner (and others).
-    Writes to <outdir>/profiling_dask.csv; outdir can be set via set_bench_outdir or BENCH_OUTDIR env.
-    """
-    _BENCH_OUTDIR.mkdir(parents=True, exist_ok=True)
-    path = _BENCH_OUTDIR / "profiling_dask.csv"
-    header_needed = not path.exists()
-    with path.open("a", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=sorted(kw.keys()))
+def _append_row(csv_path: Path, row: dict) -> None:
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    header_needed = not csv_path.exists()
+    with csv_path.open("a", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=sorted(row.keys()))
         if header_needed:
             w.writeheader()
-        w.writerow(kw)
+        w.writerow(row)
+        f.flush()  # best-effort flush
+
+def bench_row(**kw) -> None:
+    """
+    Write a single benchmark row immediately.
+    Produces two files inside the bench outdir:
+      - bench.csv
+      - profiling_dask.csv   (legacy name to match earlier scripts)
+    """
+    _BENCH_OUTDIR.mkdir(parents=True, exist_ok=True)
+    row = dict(kw)
+    _append_row(_BENCH_OUTDIR / "bench.csv", row)
+    _append_row(_BENCH_OUTDIR / "profiling_dask.csv", row)  # keep previous name around
+
+def flush_bench_csv() -> None:
+    """
+    Present for API parity; bench_row writes immediately, so this is a no-op.
+    """
+    return

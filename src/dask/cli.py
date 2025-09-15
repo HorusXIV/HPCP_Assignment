@@ -12,7 +12,7 @@ def parse_args():
     ap.add_argument("--tile", type=str, default="128,128", help="tile_h,tile_w (default 128,128)")
     ap.add_argument("--repeats", type=int, default=1, help="How many times to repeat benchmark run")
     ap.add_argument("--nmu", type=int, default=42)
-    ap.add_argument("--outdir", type=str, default="dask/benchmark_out")
+    ap.add_argument("--outdir", type=str, default=None)
 
     # cluster / scheduler
     ap.add_argument("--scheduler", type=str, default=None,
