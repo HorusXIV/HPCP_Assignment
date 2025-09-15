@@ -27,6 +27,14 @@ jobs:
       - name: Check out
         uses: actions/checkout@v4
 
+      - name: Install OS build deps (for C/C++ extensions)
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential g++ \
+          && rm -rf /var/lib/apt/lists/*
+
+
       - name: Install Poetry
         uses: snok/install-poetry@v1
 
