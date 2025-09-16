@@ -1,6 +1,7 @@
 import numpy as np
 from src.baseline.vendor.dn2dem_pos import dn2dem_pos
 
+
 def test_vendor_smoke():
     # tiny synthetic inputs
     H = W = 8; nf = 6; n_tresp = 50; nt = 16
