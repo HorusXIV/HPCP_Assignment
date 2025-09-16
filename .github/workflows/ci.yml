@@ -30,14 +30,36 @@ jobs:
       - name: Check out
         uses: actions/checkout@v4
 
+
+      - name: Cache pip & poetry caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.cache/pypoetry
+          key: pip-${{ runner.os }}-${{ runner.arch }}-py3.12-${{ hashFiles('poetry.lock') }}
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+
+      - name: Configure Poetry venv location
+        run: poetry config virtualenvs.in-project true
+
+      - name: Cache .venv
+        id: cache-venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ runner.arch }}-py3.12-${{ hashFiles('poetry.lock') }}
+
+
       - name: Install OS build deps (for C/C++ extensions)
         run: |
           apt-get update && apt-get install -y --no-install-recommends eatmydata
           DEBIAN_FRONTEND=noninteractive eatmydata apt-get install -y --no-install-recommends g++
 
-
-      - name: Install Poetry
-        uses: snok/install-poetry@v1
+      - name: Upgrade pip tooling
+        run: python -m pip install -U pip setuptools wheel
 
       - name: Install dependencies
         run: |
