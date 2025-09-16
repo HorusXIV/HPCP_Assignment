@@ -3,8 +3,8 @@
 #SBATCH -t 24:00:00
 #SBATCH --job-name=Performance_Dask
 #SBATCH --mem=32G
-#SBATCH --cpus-per-task=2
-
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
 
 set -euo pipefail
 
@@ -13,7 +13,7 @@ REPO_DIR="${REPO_DIR:-$SLURM_SUBMIT_DIR}"
 IMAGE="${IMAGE:-$REPO_DIR/containers/python_poetry.sif}"
 
 
-ENTRY="${ENTRY:-src/Dask/main.py}"
+ENTRY="${ENTRY:-src.dask.main}"
 
 echo "[SLURM] Using image: $IMAGE"
 echo "[SLURM] Repo dir:   $REPO_DIR"
@@ -28,5 +28,5 @@ singularity exec --cleanenv \
     set -euo pipefail
     cd /workspace
     poetry install --no-interaction --no-ansi
-    poetry run python \"$ENTRY\"
+    poetry run python -m \"$ENTRY\"
 "

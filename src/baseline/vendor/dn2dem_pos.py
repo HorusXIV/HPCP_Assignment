@@ -223,17 +223,20 @@ def dn2dem_pos(dn_in,edn_in,tresp,tresp_logt,temps,reg_tweak=1.0,max_iter=10,glo
     #reshape the 1d arrays to original dimensions and squeeze extra dimensions
     dem=((np.reshape(dem1d,[nx,ny,nt]))*sclf).squeeze()
     edem=((np.reshape(edem1d,[nx,ny,nt]))*sclf).squeeze()
-    elogt=(np.reshape(elogt1d,[ny,nx,nt])/(2.0*np.sqrt(2.*np.log(2.)))).squeeze()
+    # elogt1d is shaped [nx*ny, nt] -> reshape to [nx, ny, nt] to match dem/edem ordering
+    elogt=(np.reshape(elogt1d,[nx,ny,nt])/(2.0*np.sqrt(2.*np.log(2.)))).squeeze()
     chisq=(np.reshape(chisq1d,[nx,ny])).squeeze()
     dn_reg=(np.reshape(dn_reg1d,[nx,ny,nf])).squeeze()
 
     # There's probably a neater way of doing this (and maybe provide info of what was done as well?)
     # but fine for now as it works
+    # Return the binned logT (centers) as the third return value to match documentation/tests.
+    # elogt remains available as an error array with shape [nx,ny,nt].
     if emd_int and emd_ret:
-        return dem,edem,elogt,chisq,dn_reg
+        return dem,edem,logt,chisq,dn_reg
     if emd_int and not emd_ret:
-        return dem/dlogTfac,edem/dlogTfac,elogt,chisq,dn_reg
+        return dem/dlogTfac,edem/dlogTfac,logt,chisq,dn_reg
     if not emd_int and emd_ret:
-        return dem*dlogTfac,edem*dlogTfac,elogt,chisq,dn_reg
+        return dem*dlogTfac,edem*dlogTfac,logt,chisq,dn_reg
     if not emd_int and not emd_ret:
-        return dem,edem,elogt,chisq,dn_reg
+        return dem,edem,logt,chisq,dn_reg

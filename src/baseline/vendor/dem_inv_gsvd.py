@@ -45,7 +45,8 @@ def dem_inv_gsvd(A, B):
     Generalized SVD used in DEMREG.
     A = U*SA*W^-1, B = V*SB*W^-1
     """
-    AB1 = A @ np.linalg.inv(B)
+    # Use a safe pseudo-inverse for B to avoid singular matrix errors
+    AB1 = A @ safe_pinv(B)
     sze = AB1.shape
     C = np.zeros([max(sze), max(sze)])
     C[:sze[0], :sze[1]] = AB1
@@ -56,6 +57,8 @@ def dem_inv_gsvd(A, B):
     alpha = s * beta
 
     SB = np.diag(beta)
-    W  = safe_pinv(np.linalg.inv(SB) @ v @ B)
+    # Compute W using pseudo-inverses to be robust to small/zero singular values
+    SB_inv = safe_pinv(SB)
+    W = safe_pinv(SB_inv @ v @ B)
 
     return alpha, beta, u.T[:, :sze[0]], v.T, W
