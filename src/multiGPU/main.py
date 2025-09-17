@@ -7,10 +7,13 @@ light so it can be executed on development machines as a serial script.
 from __future__ import annotations
 
 import argparse
+import logging
 import numpy as np
 from . import io as mio
 from . import mpi_manager as mmpi
 from . import gpu_kernels
+from . import logging as mlog
+from .checkpoint import CheckpointManager
 
 
 def parse_args():
@@ -27,6 +30,23 @@ def main():
     args = parse_args()
 
     comm, rank, size = mmpi.init_mpi()
+    # Setup results directory structure
+    results_root = "multiGPU/results"
+    # Each rank will have a per-rank subdir; root rank will host aggregates
+    per_rank_dir = f"{results_root}/rank{rank:03d}"
+    if rank == 0:
+        # ensure parent exists
+        import os
+
+        os.makedirs(results_root, exist_ok=True)
+
+    # Initialize logging (creates logs/ under results_root)
+    logger = mlog.setup_logging(results_root, rank=rank, size=size, console=(rank == 0))
+    log = logging.getLogger(__name__)
+    log.info(f"Starting rank {rank}/{size}; results dir: {results_root}")
+
+    # Create a checkpoint manager for this rank; rank 0 can also aggregate
+    ck = CheckpointManager(outdir=per_rank_dir, keep=5, comm=comm, rank=rank)
     # Map rank to GPU and bind environment (prefer per-node local-rank mapping)
     local_rank, local_size, node = mmpi.get_local_rank_info(comm)
     gpu_assigned = mmpi.set_device_for_local_rank(comm)
@@ -145,20 +165,51 @@ def main():
             elogt_local[i:i2] = elogt_b
             chisq_local[i:i2] = chisq_b
             dn_reg_local[i:i2] = dnreg_b
+        log.info(
+            f"Rank {rank}: processed {local_dn.shape[0]} pixels on GPU {gpu_assigned}"
+        )
     else:
         # CPU fallback
         dem_norm0 = np.ones((local_dn.shape[0], nt))
         dem_local, edem_local, elogt_local, chisq_local, dn_reg_local = demmap_pos_cpu(
             local_dn, local_edn, tresp, logt, dlogt, np.ones(nf), dem_norm0=dem_norm0
         )
+        log.info(f"Rank {rank}: processed {local_dn.shape[0]} pixels on CPU fallback")
 
     # Gather results to root for final aggregation
     if comm is not None:
         dem_all = mmpi.gatherv_array(comm, dem_local, counts, root=0)
         if rank == 0:
             print(f"Computed total DEMs: {dem_all.shape[0]}")
+            # Save aggregated results to root results dir
+            import os
+
+            os.makedirs(f"{results_root}/aggregate", exist_ok=True)
+            outpath = os.path.join(f"{results_root}/aggregate", "dem_all.npz")
+            np.savez_compressed(outpath, dem_all=dem_all)
+            log.info(f"Saved aggregated DEMs to {outpath}")
+            # Optionally create a checkpoint manifest
+            ck_root = CheckpointManager(outdir=f"{results_root}/checkpoints", keep=10, comm=comm, rank=0)
+            ck_root.save({"dem_all_path": outpath, "counts": counts}, step=0, async_write=False)
     else:
         print(f"Computed total DEMs: {dem_local.shape[0]}")
+        # Save local results for serial mode
+        import os
+
+        os.makedirs(per_rank_dir, exist_ok=True)
+        outpath = os.path.join(per_rank_dir, "dem_local.npz")
+        np.savez_compressed(outpath, dem_local=dem_local)
+        log.info(f"Saved local DEMs to {outpath}")
+
+    # Save per-rank checkpoint of metadata (non-blocking)
+    meta = {"rank": rank, "n_local": int(local_dn.shape[0]), "gpu_assigned": int(gpu_assigned or -1)}
+    try:
+        ck.save(meta, step=0, async_write=True)
+    except Exception:
+        log.exception("Failed to save per-rank checkpoint")
+
+    # Clean shutdown of logging to ensure all records are flushed
+    mlog.shutdown_logging()
 
 
 
