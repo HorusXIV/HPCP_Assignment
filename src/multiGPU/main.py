@@ -31,7 +31,7 @@ def main():
 
     comm, rank, size = mmpi.init_mpi()
     # Setup results directory structure
-    results_root = "multiGPU/results"
+    results_root = "src/multiGPU/results"
     # Each rank will have a per-rank subdir; root rank will host aggregates
     per_rank_dir = f"{results_root}/rank{rank:03d}"
     if rank == 0:
