@@ -97,8 +97,6 @@ if [[ "$USE_SINGULARITY" -eq 1 ]]; then
   singularity exec --cleanenv --nv --bind "$REPO_DIR":/workspace "$IMAGE" \
     bash -lc "set -euo pipefail; cd /workspace; mkdir -p ${POETRY_VIRTUALENVS_PATH%/*}; if command -v poetry &>/dev/null; then poetry install --no-interaction --no-ansi; fi"
 
-  info "srun --mpi=pmix -n ${NTASKS} singularity exec --cleanenv --nv --bind ${REPO_DIR}:/workspace ${IMAGE} bash -lc \"cd /workspace; set -euo pipefail; poetry run python -m ${ENTRY}\""
-
   srun --mpi=pmix -n ${NTASKS} --output=${LOG_DIR}/slurm-%j-%t.out --error=${LOG_DIR}/slurm-%j-%t.err \
     singularity exec --cleanenv --nv --bind "$REPO_DIR":/workspace "$IMAGE" \
     bash -lc "set -euo pipefail; cd /workspace; poetry run python -m ${ENTRY}"
