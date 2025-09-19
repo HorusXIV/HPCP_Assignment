@@ -69,29 +69,53 @@ def scatterv_array(comm, array, counts, dtype=None):
     if comm is None:
         return array
 
-    # compute displacements
-    displs = [sum(counts[:i]) for i in range(len(counts))]
-    # Flatten and scatter counts*cols
+    # compute displacements (in rows)
+    displs_rows = [sum(counts[:i]) for i in range(len(counts))]
+
+    # Flatten and scatter counts*cols (only root needs the full array)
     if rank == 0:
-        rows = array.shape[0]
-        cols = array.shape[1]
+        rows = int(array.shape[0])
+        cols = int(array.shape[1])
         flat = array.ravel()
     else:
         rows = None
         cols = None
         flat = None
 
+    # broadcast shape info
     rows = comm.bcast(rows, root=0)
     cols = comm.bcast(cols, root=0)
 
-    # prepare recv buffer
-    local_rows = counts[rank]
-    recvbuf = _np.empty(local_rows * cols, dtype=array.dtype if array is not None else dtype)
+    # basic validation
+    if sum(counts) != rows:
+        raise ValueError(f"counts must sum to rows ({sum(counts)} != {rows})")
 
-    sendcounts = [c * cols for c in counts]
-    displs_bytes = [d * cols for d in displs]
+    local_rows = int(counts[rank])
 
-    comm.Scatterv([flat, sendcounts, displs_bytes, MPI.DOUBLE], recvbuf, root=0)
+    # determine dtype used for recv buffer
+    if array is not None:
+        recv_dtype = array.dtype
+    else:
+        if dtype is None:
+            raise ValueError("dtype must be provided on non-root ranks when array is None")
+        recv_dtype = _np.dtype(dtype)
+
+    itemsize = int(_np.dtype(recv_dtype).itemsize)
+
+    # prepare recv buffer (correct element dtype)
+    recvbuf = _np.empty(local_rows * cols, dtype=recv_dtype)
+
+    # prepare byte-wise sendcounts and displacements to avoid MPI datatype mismatches
+    sendcounts_bytes = [int(c * cols * itemsize) for c in counts]
+    displs_bytes = [int(d * cols * itemsize) for d in displs_rows]
+
+    # expose underlying byte view for transfer
+    sendbuf_bytes = flat.view(_np.uint8) if flat is not None else None
+    recvbuf_bytes = recvbuf.view(_np.uint8)
+
+    # use MPI.BYTE so counts are in bytes and avoid mismatched MPI datatypes
+    comm.Scatterv([sendbuf_bytes, sendcounts_bytes, displs_bytes, MPI.BYTE], recvbuf_bytes, root=0)
+
     return recvbuf.reshape(local_rows, cols)
 
 
@@ -107,16 +131,25 @@ def gatherv_array(comm, local_array, counts, root=0):
     cols = local_array.shape[1]
 
     sendbuf = local_array.ravel()
-    sendcounts = [c * cols for c in counts]
-    displs = [sum(sendcounts[:i]) for i in range(len(sendcounts))]
+
+    # element size in bytes
+    itemsize = int(_np.dtype(local_array.dtype).itemsize)
+
+    # compute receive buffer on root (bytes-based counts)
+    sendcounts_bytes = [int(c * cols * itemsize) for c in counts]
+    displs_bytes = [int(sum(sendcounts_bytes[:i])) for i in range(len(sendcounts_bytes))]
 
     if rank == root:
-        total_rows = sum(counts)
+        total_rows = int(sum(counts))
         recvbuf = _np.empty(total_rows * cols, dtype=local_array.dtype)
     else:
         recvbuf = None
 
-    comm.Gatherv(sendbuf, [recvbuf, sendcounts, displs, MPI.DOUBLE], root=root)
+    sendbuf_bytes = sendbuf.view(_np.uint8)
+    recvbuf_bytes = recvbuf.view(_np.uint8) if recvbuf is not None else None
+
+    # use MPI.BYTE with byte counts/displacements
+    comm.Gatherv(sendbuf_bytes, [recvbuf_bytes, sendcounts_bytes, displs_bytes, MPI.BYTE], root=root)
 
     if rank == root:
         return recvbuf.reshape(sum(counts), cols)

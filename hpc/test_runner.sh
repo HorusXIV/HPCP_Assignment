@@ -13,11 +13,8 @@ set -euo pipefail
 REPO_DIR="${REPO_DIR:-$SLURM_SUBMIT_DIR}"
 IMAGE="${IMAGE:-$REPO_DIR/containers/python_poetry.sif}"
 # Use same `ENTRY` naming as other scripts for consistency
-ENTRY="${ENTRY:-tests.mpi_test}"
+ENTRY="${ENTRY:-tests.mpi_scatterv_test}"
 PY_ENV_ACTIVATE="${PY_ENV_ACTIVATE:-}"  # optional: path to venv/conda activate script
-
-# Centralized log dir (can be overridden via env/SBATCH export)
-LOG_DIR="${LOG_DIR:-${REPO_DIR}/src/multiGPU/results/logs}"
 
 info() { printf '[SLURM] %s\n' "$*"; }
 die() { printf '[SLURM][ERROR] %s\n' "$*" >&2; exit 1; }
@@ -26,7 +23,6 @@ info "Job ${SLURM_JOB_ID:-<no-id>} on ${SLURM_JOB_NODELIST:-<no-nodelist>}"
 info "Repo dir: ${REPO_DIR}"
 info "Image:    ${IMAGE}"
 info "Entry:    ${ENTRY}"
-info "Log dir:  ${LOG_DIR}"
 
 # Compact SLURM environment summary for debugging
 info "SLURM summary: JOB_ID=${SLURM_JOB_ID:-<no-id>} NNODES=${SLURM_NNODES:-<unset>} NTASKS=${SLURM_NTASKS:-<unset>} NTASKS_PER_NODE=${SLURM_NTASKS_PER_NODE:-<unset>} NODELIST=${SLURM_JOB_NODELIST:-<unset>}"
@@ -41,7 +37,6 @@ export PYTHONUNBUFFERED=1
 
 # Ensure repo workspace and logs exist so we can capture srun outputs
 cd "$REPO_DIR"
-mkdir -p "${LOG_DIR}"
 
 # Helper: report allocated GPUs (slurm sets CUDA_VISIBLE_DEVICES on some systems)
 info "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<not-set>}"
@@ -85,9 +80,13 @@ singularity exec --cleanenv --nv --bind "$REPO_DIR":/workspace "$IMAGE" \
       then poetry install --no-interaction --no-ansi
     fi"
 
+
 srun --mpi=pmix -n ${NTASKS} \
-  singularity exec --cleanenv --nv --bind "$REPO_DIR":/workspace "$IMAGE" \
-  bash -lc "set -euo pipefail; cd /workspace; poetry run python -m ${ENTRY}"
+  singularity exec --nv --bind "$REPO_DIR":/workspace "$IMAGE" \
+  bash -lc "
+    set -euo pipefail
+    cd /workspace
+    poetry run python -m ${ENTRY}"
 
 EXIT_CODE=$?
 if [[ ${EXIT_CODE} -ne 0 ]]; then

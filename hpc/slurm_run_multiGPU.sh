@@ -2,7 +2,7 @@
 #SBATCH --job-name=HPCP_MultiGPU
 #SBATCH --partition=performance
 #SBATCH --time=24:00:00               # walltime (DD-HH:MM:SS or HH:MM:SS)
-#SBATCH --nodes=2 
+#SBATCH --nodes=1
 #SBATCH --cpus-per-task=4             
 #SBATCH --mem=24G                    
 #SBATCH --gres=gpu:2
@@ -14,9 +14,9 @@ set -euo pipefail
 # Repository and container defaults (overridable via sbatch --export)
 REPO_DIR="${REPO_DIR:-$SLURM_SUBMIT_DIR}"
 IMAGE="${IMAGE:-$REPO_DIR/containers/python_poetry.sif}"
-# Use same `ENTRY` naming as other scripts for consistency
+
 ENTRY="${ENTRY:-src.multiGPU.main}"
-PY_ENV_ACTIVATE="${PY_ENV_ACTIVATE:-}"  # optional: path to venv/conda activate script
+PY_ENV_ACTIVATE="${PY_ENV_ACTIVATE:-}"
 
 # Centralized log dir (can be overridden via env/SBATCH export)
 LOG_DIR="${LOG_DIR:-${REPO_DIR}/src/multiGPU/results/logs}"
@@ -55,7 +55,6 @@ fi
 # Launch with srun on the host and have srun invoke singularity per task.
 # This avoids requiring `srun` inside the container image.
 # Compute a safe NTASKS: prefer SLURM_NTASKS if provided, otherwise derive from
-# allocated nodes * GPUs-per-node (caller may override GPUS_PER_NODE).
 if [[ -n "${SLURM_NTASKS:-}" ]]; then
   NTASKS=${NTASKS:-${SLURM_NTASKS}}
 else
@@ -87,29 +86,9 @@ singularity exec --cleanenv --nv --bind "$REPO_DIR":/workspace "$IMAGE" \
       then poetry install --no-interaction --no-ansi
     fi"
 
-# Quick runtime check: ensure mpi4py is importable inside the prepared venv.
-# Use a heredoc for the Python snippet to avoid tricky shell escaping.
-info "Checking for mpi4py inside the prepared virtualenv"
-singularity exec --cleanenv --nv --bind "$REPO_DIR":/workspace "$IMAGE" \
-  bash -lc "
-    set -euo pipefail
-    cd /workspace
-    . /workspace/.venv/bin/activate 2>/dev/null || true
-    python - <<'PY'
-import sys
-try:
-    import mpi4py
-    print('mpi4py OK:', getattr(mpi4py, '__file__', '<builtin>'))
-except Exception as e:
-    print('mpi4py import failed:', e)
-    print('sys.path:', ':'.join(sys.path))
-    raise SystemExit(1)
-PY
-"
-
 srun --mpi=pmix -n ${NTASKS} \
-  singularity exec --cleanenv --nv --bind "$REPO_DIR":/workspace "$IMAGE" \
-  bash -lc "set -euo pipefail; cd /workspace; poetry run python -m ${ENTRY} --input-dir data/np32"
+  singularity exec --nv --bind "$REPO_DIR":/workspace "$IMAGE" \
+  poetry run python -m ${ENTRY} --input-dir data/np32
 
 EXIT_CODE=$?
 if [[ ${EXIT_CODE} -ne 0 ]]; then
