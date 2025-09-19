@@ -1,5 +1,5 @@
 Bootstrap: docker
-From: iterativeai/cml:0-dvc3-base1-gpu
+From: nvidia/cuda:12.8.1-runtime-ubuntu22.04
 Stage: build
 
 %environment
@@ -26,8 +26,8 @@ Stage: build
 
     # Default versions (can be overridden)
     export PYTHON_VERSION=${PYTHON_VERSION:-3.12.8}
-    export PIP_VERSION=${PIP_VERSION:-24.3.1}
-    export POETRY_VERSION=${POETRY_VERSION:-2.1.1}
+    export PIP_VERSION=${PIP_VERSION:-25.2}
+    export POETRY_VERSION=${POETRY_VERSION:-2.1.4}
 
     # Pip and pipx settings
     export PIP_ROOT_USER_ACTION=ignore
@@ -63,7 +63,10 @@ Stage: build
         libexpat1-dev \
         liblzma-dev \
         tk-dev \
-        wget
+        wget \
+        libffi-dev \
+        libopenmpi3 \
+        openmpi-bin
 
     # Rename the preinstalled python3 (old binary is preserved).
     if [ -f /usr/bin/python3 ]; then
@@ -92,9 +95,9 @@ Stage: build
     python --version
 
     # Upgrade setuptools and pip using the new Python.
-    python3 -m pip install --upgrade setuptools
+    python3 -m pip install --upgrade setuptools wheel
     python3 -m pip install --upgrade pip==${PIP_VERSION}
-
+    python3 -m pip install mpi4py
 
     # Install pipx and configure it for global binary installation.
     python3 -m pip install pipx

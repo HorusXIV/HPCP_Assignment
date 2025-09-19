@@ -18,7 +18,10 @@ from .checkpoint import CheckpointManager
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--input", default="data/np32/20170906_12_00_12.npz")
+    p.add_argument("--input", default=None,
+                   help="single input file to process (mutually exclusive with --input-dir)")
+    p.add_argument("--input-dir", default=None,
+                   help="directory to scan for .npz input files; rank 0 will enumerate and distribute them")
     p.add_argument("--max-samples", type=int, default=1000,
                    help="maximum number of spatial samples (pixels) to process for smoke tests")
     p.add_argument("--block-size", type=int, default=128,
@@ -41,7 +44,7 @@ def main():
         os.makedirs(results_root, exist_ok=True)
 
     # Initialize logging (creates logs/ under results_root)
-    logger = mlog.setup_logging(results_root, rank=rank, size=size, console=(rank == 0))
+    _ = mlog.setup_logging(results_root, rank=rank, size=size, console=(rank == 0))
     log = logging.getLogger(__name__)
     log.info(f"Starting rank {rank}/{size}; results dir: {results_root}")
 
@@ -50,46 +53,95 @@ def main():
     # Map rank to GPU and bind environment (prefer per-node local-rank mapping)
     local_rank, local_size, node = mmpi.get_local_rank_info(comm)
     gpu_assigned = mmpi.set_device_for_local_rank(comm)
+    # Startup banner
     if rank == 0:
-        print(f"MPI size={size}, launching job with input={args.input}, node={node}, local_size={local_size}, gpu_assigned={gpu_assigned}")
+        print(f"MPI size={size}, node={node}, local_size={local_size}, gpu_assigned={gpu_assigned}")
 
-    if rank == 0:
-        print(f"MPI size={size}, launching job with input={args.input}")
+    # Decide input list: either single file or enumerate a directory
+    import os
+    import glob
 
-    # Simple serial-friendly loader
-    data = mio.load_npz(args.input)
+    if args.input_dir and args.input:
+        if rank == 0:
+            raise RuntimeError("Specify only one of --input or --input-dir")
 
-    # Heuristics for common file layouts: prefer `dn`/`edn`, otherwise `bands`
-    dn = data.get("dn", None)
-    edn = data.get("edn", None)
-    if dn is None:
-        # AIA-style archive: `bands` shaped (nf, ny, nx)
-        if "bands" in data:
-            bands = data["bands"]
-            if bands.ndim != 3:
-                raise RuntimeError("Unexpected `bands` shape, expected (nf, ny, nx)")
-            nf, ny, nx = bands.shape
-            n_pixels = ny * nx
-            max_samples = args.max_samples
-            # reshape to (nf, n_pixels) and sample columns if necessary
-            bands_flat = bands.reshape(nf, n_pixels)
-            if max_samples is not None and n_pixels > max_samples:
-                idx = np.linspace(0, n_pixels - 1, num=max_samples, dtype=int)
-                dn2d = bands_flat[:, idx].T
-            else:
-                dn2d = bands_flat.T
-            # default edn: ones per filter, broadcast to pixels
-            edn2d = np.ones((dn2d.shape[0], nf), dtype=float)
-            dn = dn2d
-            edn = edn2d
+    if args.input_dir:
+        # Rank 0 enumerates files and distributes the list to all ranks
+        if rank == 0:
+            pattern = os.path.join(args.input_dir, "*.npz")
+            all_inputs = sorted(glob.glob(pattern))
+            if len(all_inputs) == 0:
+                raise RuntimeError(f"No .npz files found in {args.input_dir}")
         else:
-            # try generic first array(s)
-            arrays = [v for v in data.values()]
-            if len(arrays) >= 2:
-                dn, edn = arrays[0], arrays[1]
+            all_inputs = None
+
+        # Broadcast the list of inputs to all ranks (serial stub will just get None->handled)
+        if comm is not None:
+            all_inputs = comm.bcast(all_inputs, root=0)
+        else:
+            # non-MPI fallback: enumerate locally
+            all_inputs = sorted(glob.glob(os.path.join(args.input_dir, "*.npz")))
+
+        # Assign contiguous ranges of files to each rank for balanced I/O
+        n_files = len(all_inputs)
+        counts = [n_files // size + (1 if i < (n_files % size) else 0) for i in range(size)]
+        displs = [sum(counts[:i]) for i in range(len(counts))]
+        my_start = displs[rank]
+        my_end = my_start + counts[rank]
+        my_inputs = all_inputs[my_start:my_end]
+
+        if rank == 0:
+            print(f"Distributing {n_files} input files across {size} ranks: counts={counts}")
+
+    else:
+        # Single-input mode (existing behavior)
+        if args.input is None:
+            # default to the old hard-coded example if nothing provided
+            args.input = "data/np32/20170906_12_00_12.npz"
+        my_inputs = [args.input]
+
+    if rank == 0:
+        print(f"Rank {rank} will process {len(my_inputs)} input(s)")
+
+    # Process each assigned input file independently
+    for input_path in my_inputs:
+        if rank == 0:
+            print(f"Processing input {input_path} on rank {rank}")
+
+        # Simple serial-friendly loader (per-file)
+        data = mio.load_npz(input_path)
+
+        # Heuristics for common file layouts: prefer `dn`/`edn`, otherwise `bands`
+        dn = data.get("dn", None)
+        edn = data.get("edn", None)
+        if dn is None:
+            # AIA-style archive: `bands` shaped (nf, ny, nx)
+            if "bands" in data:
+                bands = data["bands"]
+                if bands.ndim != 3:
+                    raise RuntimeError("Unexpected `bands` shape, expected (nf, ny, nx)")
+                nf, ny, nx = bands.shape
+                n_pixels = ny * nx
+                max_samples = args.max_samples
+                # reshape to (nf, n_pixels) and sample columns if necessary
+                bands_flat = bands.reshape(nf, n_pixels)
+                if max_samples is not None and n_pixels > max_samples:
+                    idx = np.linspace(0, n_pixels - 1, num=max_samples, dtype=int)
+                    dn2d = bands_flat[:, idx].T
+                else:
+                    dn2d = bands_flat.T
+                # default edn: ones per filter, broadcast to pixels
+                edn2d = np.ones((dn2d.shape[0], nf), dtype=float)
+                dn = dn2d
+                edn = edn2d
             else:
-                if rank == 0:
-                    raise RuntimeError("Input file does not contain dn and edn arrays")
+                # try generic first array(s)
+                arrays = [v for v in data.values()]
+                if len(arrays) >= 2:
+                    dn, edn = arrays[0], arrays[1]
+                else:
+                    if rank == 0:
+                        raise RuntimeError("Input file does not contain dn and edn arrays")
 
     # Distribute dn rows across ranks using MPI scatter/gather semantics.
     # We'll fall back to using the baseline CPU demmap_pos on each rank for
@@ -176,30 +228,32 @@ def main():
         )
         log.info(f"Rank {rank}: processed {local_dn.shape[0]} pixels on CPU fallback")
 
-    # Gather results to root for final aggregation
-    if comm is not None:
-        dem_all = mmpi.gatherv_array(comm, dem_local, counts, root=0)
-        if rank == 0:
-            print(f"Computed total DEMs: {dem_all.shape[0]}")
-            # Save aggregated results to root results dir
+        # Gather results to root for final aggregation
+        if comm is not None:
+            dem_all = mmpi.gatherv_array(comm, dem_local, counts, root=0)
+            if rank == 0:
+                print(f"Computed total DEMs: {dem_all.shape[0]}")
+                # Save aggregated results to root results dir (per-input)
+                import os
+
+                os.makedirs(f"{results_root}/aggregate", exist_ok=True)
+                inbase = os.path.splitext(os.path.basename(input_path))[0]
+                outpath = os.path.join(f"{results_root}/aggregate", f"dem_all_{inbase}.npz")
+                np.savez_compressed(outpath, dem_all=dem_all)
+                log.info(f"Saved aggregated DEMs to {outpath}")
+                # Optionally create a checkpoint manifest
+                ck_root = CheckpointManager(outdir=f"{results_root}/checkpoints", keep=10, comm=comm, rank=0)
+                ck_root.save({"dem_all_path": outpath, "counts": counts}, step=0, async_write=False)
+        else:
+            print(f"Computed total DEMs: {dem_local.shape[0]}")
+            # Save local results for serial mode (per-input)
             import os
 
-            os.makedirs(f"{results_root}/aggregate", exist_ok=True)
-            outpath = os.path.join(f"{results_root}/aggregate", "dem_all.npz")
-            np.savez_compressed(outpath, dem_all=dem_all)
-            log.info(f"Saved aggregated DEMs to {outpath}")
-            # Optionally create a checkpoint manifest
-            ck_root = CheckpointManager(outdir=f"{results_root}/checkpoints", keep=10, comm=comm, rank=0)
-            ck_root.save({"dem_all_path": outpath, "counts": counts}, step=0, async_write=False)
-    else:
-        print(f"Computed total DEMs: {dem_local.shape[0]}")
-        # Save local results for serial mode
-        import os
-
-        os.makedirs(per_rank_dir, exist_ok=True)
-        outpath = os.path.join(per_rank_dir, "dem_local.npz")
-        np.savez_compressed(outpath, dem_local=dem_local)
-        log.info(f"Saved local DEMs to {outpath}")
+            os.makedirs(per_rank_dir, exist_ok=True)
+            inbase = os.path.splitext(os.path.basename(input_path))[0]
+            outpath = os.path.join(per_rank_dir, f"dem_local_{inbase}.npz")
+            np.savez_compressed(outpath, dem_local=dem_local)
+            log.info(f"Saved local DEMs to {outpath}")
 
     # Save per-rank checkpoint of metadata (non-blocking)
     meta = {"rank": rank, "n_local": int(local_dn.shape[0]), "gpu_assigned": int(gpu_assigned or -1)}
@@ -210,7 +264,6 @@ def main():
 
     # Clean shutdown of logging to ensure all records are flushed
     mlog.shutdown_logging()
-
 
 
 if __name__ == "__main__":
