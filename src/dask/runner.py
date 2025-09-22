@@ -1,298 +1,414 @@
+# src/dask/runner.py
 from __future__ import annotations
+"""
+Dask cluster runner.
 
-import json
-import time
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Optional, Sequence, Tuple, Union
+This module constructs a local or SLURM-backed Dask cluster, optionally
+scales it, and dispatches a user-specified task in the form
+`module.submodule:function`.
 
-import numpy as np
-import dask.array as da
+Highlights
+----------
+- Caps BLAS/OpenMP threads early (via `threadpoolctl` if available) to avoid
+  oversubscription in worker processes.
+- Picks sensible defaults for LocalCluster ports/dirs and respects SLURM
+  scratch/tmp directories when present.
+- Supports adaptive scaling, explicit scaling, or fixed `n_workers`.
+- Provides a backward-compat `run_dask_suite` shim to call in-repo suites.
+"""
+
+import contextlib
+import importlib
+import logging
+import os
+from typing import Any, Callable, Optional, Tuple
+
 from dask.distributed import Client, LocalCluster
+from src.common.paths import slurm_context
+from src.common.threads import early_env_caps  # ensure BLAS/Omp threads are capped
 
-# rigid IO & tiling contracts
-import src.common.io as io
-from src.dask.tiling import dem_map_blocks, _set_constants
-
-# profiling hooks
-try:
-    from src.common.profiling import bench_row, set_bench_outdir, flush_bench_csv  # type: ignore
-except Exception:  # pragma: no cover
-    def set_bench_outdir(_outdir: str) -> None:  # type: ignore
-        pass
-    def bench_row(**_kw) -> None:  # type: ignore
-        pass
-    def flush_bench_csv() -> None:  # type: ignore
-        pass
+log = logging.getLogger(__name__)
 
 
-# ---------- helpers ----------
-def _parse_idx(idx: Union[str, int, slice, Sequence[int], None]) -> Union[int, slice, Sequence[int], None]:
+def _load_callable(spec: str) -> Callable:
     """
-    Accepts "-1", "0", "1,3,5", "10:20", or already-parsed values and
-    returns an int/slice/list usable by io.load_np_stack(..., idx=...).
-    """
-    if idx is None or isinstance(idx, (int, slice)) or isinstance(idx, (list, tuple)):
-        return idx
-    s = str(idx).strip()
-    if not s:
-        return None
-    if ":" in s:
-        # slice form a:b[:c]
-        bits = [b.strip() for b in s.split(":")]
-        parts = [int(b) if b else None for b in bits]
-        return slice(*parts)
-    if "," in s:
-        return [int(x.strip()) for x in s.split(",") if x.strip()]
-    # plain integer (supports "-1")
-    return int(s)
+    Import and return a callable from a 'module:function' spec.
 
-
-def _target_hw_from_sizes(sizes: Tuple[int, ...], h0: int, w0: int) -> Tuple[int, int]:
-    """
-    Interpret the --sizes tuple for a single frame crop.
-    - If two last numbers are H,W -> use those (clipped to data).
-    - If only one number -> use symmetric LxL (clipped).
-    - Otherwise fall back to existing H,W.
-    """
-    if not sizes:
-        return h0, w0
-    if len(sizes) >= 2:
-        Ht, Wt = int(sizes[-2]), int(sizes[-1])
-    else:
-        Ht = Wt = int(sizes[-1])
-    return min(Ht, h0), min(Wt, w0)
-
-
-def _load_tresp_any():
-    """
-    Try several places for thermal response matrices.
+    Parameters
+    ----------
+    spec : str
+        Import target, e.g. "src.dask.suite:run".
 
     Returns
     -------
-    (T_RESP, T_RESP_LOGT, TEMPS)
-      T_RESP:         (n_logT, nf)
-      T_RESP_LOGT:    (n_logT,)
-      TEMPS:          (nt+1,)   temperature *edges* in Kelvin (len-1 == nt)
+    Callable
+        The resolved function object.
+
+    Raises
+    ------
+    ValueError
+        If the resolved attribute is not callable.
+    ImportError
+        If the module cannot be imported.
+    AttributeError
+        If the attribute is missing on the imported module.
     """
-    # 1) src.common.dem_api.load_tresp
-    try:
-        import src.common.dem_api as dem_api  # type: ignore
-        if hasattr(dem_api, "load_tresp") and callable(getattr(dem_api, "load_tresp")):
-            return dem_api.load_tresp()
-    except Exception:
-        pass
+    mod, fn = spec.split(":", 1)
+    m = importlib.import_module(mod)
+    f = getattr(m, fn, None)
+    if not callable(f):
+        raise ValueError(f"Not callable: {spec}")
+    return f
 
-    # 2) src.common.responses.load_tresp
-    try:
-        import src.common.responses as resp  # type: ignore
-        if hasattr(resp, "load_tresp") and callable(getattr(resp, "load_tresp")):
-            return resp.load_tresp()
-    except Exception:
-        pass
 
-    # 3) src.common.responses.prepare_synthetic_responses -> (T_RESP, logT, TEMPS)
-    try:
-        import src.common.responses as resp  # type: ignore
-        if hasattr(resp, "prepare_synthetic_responses"):
-            T_RESP, logT, TEMPS = resp.prepare_synthetic_responses()
-            return T_RESP, np.asarray(logT), np.asarray(TEMPS)
-    except Exception:
-        pass
+def _build_local_cluster(args):
+    """
+    Create a LocalCluster with safe defaults.
 
-    raise ImportError(
-        "Could not load response matrices. Expected one of:\n"
-        " - src.common.dem_api.load_tresp()\n"
-        " - src.common.responses.load_tresp()\n"
-        " - src.common.responses.prepare_synthetic_responses()\n"
-        "Please implement one of these loaders."
+    Notes
+    -----
+    - Caps BLAS/OpenMP threads in worker processes to 1 to avoid oversubscription.
+    - Uses SLURM scratch/tmp as `local_directory` when available.
+    - Chooses random free ports by default (Windows- & multi-run friendly).
+    """
+    # Cap BLAS/OpenMP threads inside worker *processes* to avoid oversubscription.
+    # Use 1 as a safe default; inherits to child processes.
+    early_env_caps(1)
+
+    n_workers = getattr(args, "n_workers", None)
+    threads_per_worker = getattr(args, "threads_per_worker", 1)
+    memory_limit = getattr(args, "memory_limit", None)
+    processes = bool(getattr(args, "processes", True))
+
+    sctx = slurm_context()
+    local_directory = (
+        getattr(args, "local_directory", None)
+        or sctx.get("tmpdir")
+        or sctx.get("scratch")
+        or None
     )
 
+    scheduler_port = getattr(args, "scheduler_port", None)
+    if scheduler_port in (None, "None", ""):
+        scheduler_port = 0  # random free port
+    dashboard_address = getattr(args, "dashboard_address", None) or ":0"
 
-# ---------- types ----------
-@dataclass
-class RunSummary:
-    size: Tuple[int, int]
-    tile: Tuple[int, int]
-    wall_s: float
-    n_workers: int
-    threads_per_worker: int
-    processes: bool
+    log.info(
+        "Starting LocalCluster (n_workers=%s, threads_per_worker=%s, memory_limit=%s, processes=%s) "
+        "[slurm job=%s task=%s tmp=%s]",
+        n_workers,
+        threads_per_worker,
+        memory_limit,
+        processes,
+        sctx.get("job_id"),
+        sctx.get("array_task_id"),
+        local_directory,
+    )
 
-
-# ---------- local cluster helper ----------
-def _start_cluster(
-    n_workers: int,
-    threads_per_worker: int,
-    processes: bool,
-    memory_limit: str,
-    local_directory: str,
-) -> tuple[Client, LocalCluster]:
     cluster = LocalCluster(
         n_workers=n_workers,
         threads_per_worker=threads_per_worker,
-        processes=processes,
         memory_limit=memory_limit,
-        dashboard_address=None,
-        local_directory=local_directory,  # put worker scratch inside outdir
+        processes=processes,
+        scheduler_port=scheduler_port,
+        dashboard_address=dashboard_address,
+        local_directory=local_directory,
     )
-    return Client(cluster), cluster
+    return cluster
 
 
-# ---------- main suite ----------
-def run_dask_suite(
-    *,
-    # data selection / sizing
-    use_synthetic: bool,                     # kept for interface parity; ignored (we load real files)
-    data_dir: Optional[str],
-    ext: str,
-    idx: Union[str, int, slice, Sequence[int], None],
-    sizes: Tuple[int, ...],
-    # tiling
-    tile: Optional[Tuple[int, int]] = None,
-    tile_h: Optional[int] = None,
-    tile_w: Optional[int] = None,
-    # algorithm
-    repeats: int = 3,
-    nmu: int = 42,
-    # cluster / scheduler
-    scheduler: Optional[str] = None,
-    n_workers: int = 4,
-    threads_per_worker: int = 1,
-    processes: bool = False,
-    memory_limit: str = "8GB",
-    # profiling/artifacts
-    outdir: str = "benchmark_out",
-) -> dict:
+def _build_slurm_cluster(args):
     """
-    Build the Dask graph once using src.dask.tiling.dem_map_blocks and benchmark it.
+    Create a SLURM-backed Dask cluster (dask-jobqueue).
 
-    Only depends on:
-      - src.common.io.{default_files, load_np_stack}
-      - src.dask.tiling.{dem_map_blocks, _set_constants}
-      - response loader from _load_tresp_any()
+    Environment fallbacks
+    ---------------------
+    Reads common environment variables (e.g., DASK_SLURM_QUEUE, SLURM_ACCOUNT)
+    when explicit CLI args are absent.
+
+    Logging
+    -------
+    Logs are placed under SLURM scratch if available, else the submit dir,
+    else a local ./dask-logs directory.
+
+    Raises
+    ------
+    RuntimeError
+        If `dask_jobqueue` is not installed.
     """
-    outdir_p = Path(outdir).resolve()
-    outdir_p.mkdir(parents=True, exist_ok=True)
+    # Same early cap so SLURM workers inherit sane BLAS/OpenMP limits.
+    early_env_caps(1)
 
-    # profiling sink
-    set_bench_outdir(outdir_p)
-
-    # normalize tile
-    if tile is None:
-        tile = (int(tile_h or 256), int(tile_w or 256))
-    th, tw = int(tile[0]), int(tile[1])
-
-    # Client: connect or start local
-    if scheduler:
-        client = Client(scheduler)
-        cluster = None
-    else:
-        client, cluster = _start_cluster(
-            n_workers=n_workers,
-            threads_per_worker=threads_per_worker,
-            processes=processes,
-            memory_limit=str(memory_limit),
-            local_directory=str(outdir_p / "dask-worker-space"),
-        )
-
-    files_used: list[str] = []
     try:
-        # ----------- load input frame (6, H, W) -----------
-        files = io.default_files(ext=ext, directory=data_dir)
-        idx_parsed = _parse_idx(idx)
-        stack, paths = io.load_np_stack(files, idx=idx_parsed, dtype=np.float32, contiguous=True, return_paths=True)  # (N,6,H,W)
-        files_used = [str(p) for p in paths]
+        from dask_jobqueue import SLURMCluster
+    except Exception as e:
+        raise RuntimeError(
+            "SLURM mode requested but dask_jobqueue is not available. "
+            "Install with `pip install dask-jobqueue`."
+        ) from e
 
-        if stack.ndim != 4 or stack.shape[1] != 6:
-            raise ValueError(f"Expected (N,6,H,W) from load_np_stack, got {stack.shape}")
+    sctx = slurm_context()
 
-        frame_6hw = np.ascontiguousarray(stack[0])  # (6,H,W)
-        H0, W0 = int(frame_6hw.shape[1]), int(frame_6hw.shape[2])
+    def _env(*keys: str, default: Optional[str] = None) -> Optional[str]:
+        for k in keys:
+            if k in os.environ and os.environ[k]:
+                return os.environ[k]
+        return default
 
-        # Optional crop according to --sizes
-        Ht, Wt = _target_hw_from_sizes(sizes, H0, W0)
-        if (Ht, Wt) != (H0, W0):
-            frame_6hw = frame_6hw[:, :Ht, :Wt]
-            H0, W0 = Ht, Wt
+    queue = getattr(args, "queue", None) or _env(
+        "DASK_SLURM_QUEUE", "SLURM_QUEUE", "PARTITION"
+    )
+    account = (
+        getattr(args, "account", None)
+        or getattr(args, "project", None)
+        or _env("DASK_SLURM_ACCOUNT", "SLURM_ACCOUNT")
+    )
+    cores = getattr(args, "cores", None) or _env("DASK_SLURM_CORES")
+    memory = getattr(args, "memory", None) or _env("DASK_SLURM_MEMORY")
+    processes = getattr(args, "processes", None) or _env("DASK_SLURM_PROCESSES")
+    walltime = getattr(args, "walltime", None) or _env("DASK_SLURM_WALLTIME")
+    interface = getattr(args, "interface", None) or _env("DASK_DISTRIBUTED_INTERFACE")
 
-        # ----------- load & broadcast heavy constants -----------
-        T_RESP, T_RESP_LOGT, TEMPS = _load_tresp_any()
-        if T_RESP.shape[1] != 6:
-            # Friendly error mirroring what you saw from vendor code
-            raise ValueError("Tresp needs to be the same number of wavelengths/filters as the data (nf=6).")
-        nt = int(len(TEMPS) - 1)
-        client.run(_set_constants, T_RESP, T_RESP_LOGT, TEMPS, int(nmu))
+    # Prefer scratch for logs; fall back to submit dir; last resort: current dir
+    log_directory = getattr(args, "log_directory", None)
+    if not log_directory:
+        if sctx.get("scratch"):
+            log_directory = os.path.join(
+                sctx["scratch"], f"dask-logs/{sctx.get('job_id') or 'nojid'}"
+            )
+        elif sctx.get("submit_dir"):
+            log_directory = os.path.join(sctx["submit_dir"], "dask-logs")
+        else:
+            log_directory = "./dask-logs"
 
-        # ----------- build graph -----------
-        darr = da.from_array(frame_6hw, chunks=(6, th, tw), asarray=False)
-        d_dem = dem_map_blocks(darr, nt=nt, tile_h=th, tile_w=tw)  # (H,W,nt)
+    job_extra_raw = getattr(args, "job_extra", None) or _env("DASK_SLURM_JOB_EXTRA")
+    job_extra = (
+        [s.strip() for s in job_extra_raw.split(",")]
+        if isinstance(job_extra_raw, str)
+        else job_extra_raw
+    )
+    env_extra_raw = getattr(args, "env_extra", None)
+    env_extra = (
+        [s.strip() for s in env_extra_raw]
+        if isinstance(env_extra_raw, list)
+        else env_extra_raw
+    )
+    worker_extra_args_raw = getattr(args, "worker_extra_args", None)
+    worker_extra_args = (
+        [s.strip() for s in worker_extra_args_raw]
+        if isinstance(worker_extra_args_raw, list)
+        else worker_extra_args_raw
+    )
+    scheduler_options = getattr(args, "scheduler_options", None)
 
-        # small warm-up to catch issues early, minimal materialization
-        _ = d_dem[: min(32, H0), : min(32, W0), :].sum().compute()
+    log.info(
+        "Starting SLURMCluster(queue=%s, account=%s, cores=%s, memory=%s, walltime=%s, interface=%s)",
+        queue,
+        account,
+        cores,
+        memory,
+        walltime,
+        interface,
+    )
 
-        # ----------- timed loop -----------
-        t0 = time.perf_counter()
-        for _ in range(int(repeats)):
-            dd = d_dem.persist()
-            _ = dd.sum().compute()  # low-peak reduction; avoids materializing full (H,W,nt)
-        wall = time.perf_counter() - t0
+    cluster = SLURMCluster(
+        queue=queue,
+        account=account,
+        cores=cores,
+        memory=memory,
+        processes=processes,
+        walltime=walltime,
+        interface=interface,
+        local_directory=sctx.get("scratch") or sctx.get("tmpdir") or None,
+        log_directory=log_directory,
+        job_extra=job_extra,
+        env_extra=env_extra,
+        scheduler_options=scheduler_options,
+        worker_extra_args=worker_extra_args,
+    )
+    return cluster
 
-        # ----------- write one bench row -----------
-        bench_row(
-            impl="dask",
-            size=f"({H0},{W0})",
-            tile=f"({th},{tw})",
-            repeats=int(repeats),
-            n_workers=int(n_workers),
-            threads_per_worker=int(threads_per_worker),
-            processes=int(bool(processes)),
-            memory_limit=str(memory_limit),
-            wall_s=round(float(wall), 4),
+
+def create_cluster(args) -> Tuple[Any, Client]:
+    """
+    Build a cluster (local or SLURM) and return it with a connected Client.
+
+    Parameters
+    ----------
+    args : argparse.Namespace-like
+        Parsed CLI arguments with `cluster_mode` and optional cluster settings.
+
+    Returns
+    -------
+    (cluster, client)
+        The constructed Dask cluster and a connected Client.
+
+    Raises
+    ------
+    ValueError
+        If an unknown `--cluster-mode` is requested.
+    """
+    mode = (getattr(args, "cluster_mode", None) or "local").lower()
+    if mode not in {"local", "slurm"}:
+        raise ValueError(f"Unknown --cluster-mode '{mode}'. Use 'local' or 'slurm'.")
+    cluster = (
+        _build_local_cluster(args) if mode == "local" else _build_slurm_cluster(args)
+    )
+    client = Client(cluster)
+    return cluster, client
+
+
+def _maybe_scale(cluster, args) -> None:
+    """
+    Optionally scale or adapt the cluster based on args.
+
+    Supported knobs (if present on `args`)
+    --------------------------------------
+    - adapt_min / adapt_max / adapt_target : enable cluster.adapt(min, max, target)
+    - scale : call cluster.scale(scale)
+    - n_workers : call cluster.scale(n_workers)
+    """
+    n_workers = getattr(args, "n_workers", None)
+    scale = getattr(args, "scale", None)
+    adapt_min = getattr(args, "adapt_min", None)
+    adapt_max = getattr(args, "adapt_max", None)
+    adapt_target = getattr(args, "adapt_target", None)
+
+    with contextlib.suppress(Exception):
+        if adapt_min is not None or adapt_max is not None:
+            kw = {}
+            if adapt_min is not None:
+                kw["minimum"] = int(adapt_min)
+            if adapt_max is not None:
+                kw["maximum"] = int(adapt_max)
+            if adapt_target is not None:
+                kw["target"] = int(adapt_target)
+            log.info("Enabling adaptive scaling with %s", kw)
+            cluster.adapt(**kw)  # type: ignore[attr-defined]
+            return
+
+    if scale is not None:
+        with contextlib.suppress(Exception):
+            log.info("Scaling cluster to: %s", scale)
+            cluster.scale(scale)  # type: ignore[attr-defined]
+            return
+
+    if n_workers is not None:
+        with contextlib.suppress(Exception):
+            log.info("Scaling cluster to n_workers=%s", n_workers)
+            cluster.scale(int(n_workers))  # type: ignore[attr-defined]
+
+
+def run(args) -> int:
+    """
+    Start a Dask cluster and dispatch the requested task.
+
+    Behavior
+    --------
+    - Logs basic SLURM context if available.
+    - Creates cluster + client via `create_cluster(args)`.
+    - Optionally scales/adapts the cluster with `_maybe_scale`.
+    - If `args.task` is provided, imports and calls it, trying call signatures:
+        (client=client, args=args) → (client) → ().
+      Afterwards, always closes client and cluster.
+    - If no task is provided, exits cleanly after bringing a client up.
+
+    Returns
+    -------
+    int
+        0 on success.
+    """
+    sctx = slurm_context()
+    if any(sctx.values()):
+        log.info(
+            "SLURM context: job=%s name=%s array_job=%s task=%s submit_dir=%s tmp=%s scratch=%s",
+            sctx.get("job_id"),
+            sctx.get("job_name"),
+            sctx.get("array_job_id"),
+            sctx.get("array_task_id"),
+            sctx.get("submit_dir"),
+            sctx.get("tmpdir"),
+            sctx.get("scratch"),
         )
-        flush_bench_csv()  # ensure file is present on disk right away
 
-        # ----------- summary artifacts -----------
-        (outdir_p / "RUN_SUMMARY.txt").write_text(
-            f"Size=({H0}, {W0})  Tile=({th}, {tw})  Wall(s)={wall:.3f}  "
-            f"Workers={n_workers}  TPW={threads_per_worker}  Processes={processes}\n",
-            encoding="utf-8",
-        )
-        (outdir_p / "run_summary.json").write_text(
-            json.dumps(
-                {
-                    "size": [H0, W0],
-                    "tile": [th, tw],
-                    "wall_s": round(float(wall), 6),
-                    "n_workers": int(n_workers),
-                    "threads_per_worker": int(threads_per_worker),
-                    "processes": bool(processes),
-                    "memory_limit": str(memory_limit),
-                    "files_used": files_used,
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+    cluster, client = create_cluster(args)
+    log.info("Dashboard: %s", getattr(client, "dashboard_link", None))
+    _maybe_scale(cluster, args)
 
-        return {
-            "outdir": str(outdir_p),
-            "files_used": files_used,
-            "size": (H0, W0),
-            "tile": (th, tw),
-            "wall_s": float(wall),
-            "n_workers": int(n_workers),
-            "threads_per_worker": int(threads_per_worker),
-            "processes": bool(processes),
-        }
-
-    finally:
+    task = getattr(args, "task", None)
+    if task:
+        fn = _load_callable(task)
+        log.info("Running task: %s", task)
         try:
-            client.close()
-        except Exception:
-            pass
-        if 'cluster' in locals() and cluster is not None:
             try:
+                fn(client=client, args=args)
+            except TypeError:
+                try:
+                    fn(client)
+                except TypeError:
+                    fn()
+        finally:
+            client.close()
+            with contextlib.suppress(Exception):
                 cluster.close()
-            except Exception:
-                pass
+        return 0
+
+    log.info("No task specified; cluster is up. Exiting after establishing client.")
+    client.close()
+    with contextlib.suppress(Exception):
+        cluster.close()
+    return 0
+
+
+def run_dask_suite(*, client=None, args=None, **_ignored) -> int:
+    """
+    Backward-compatibility shim expected by `src.dask.__init__`.
+
+    Tries to dispatch to:
+      - `src.dask.suite:run`
+      - `src.suite:run`
+
+    Parameters
+    ----------
+    client : dask.distributed.Client | None
+        An existing Dask client. If None, the shim does nothing.
+    args : Any
+        Optional argument namespace to pass to the workload.
+
+    Returns
+    -------
+    int
+        0 on success; 0 with a warning if no workload is found.
+    """
+    if client is None:
+        log.warning(
+            "run_dask_suite shim called without a Dask client. "
+            "This shim is task-level and does not start clusters."
+        )
+        return 0
+
+    for mod, func in [("src.dask.suite", "run"), ("src.suite", "run")]:
+        try:
+            m = importlib.import_module(mod)
+            fn = getattr(m, func, None)
+            if callable(fn):
+                log.info("run_dask_suite: dispatching to %s:%s", mod, func)
+                try:
+                    fn(client=client, args=args)
+                except TypeError:
+                    try:
+                        fn(client)
+                    except TypeError:
+                        fn()
+                return 0
+        except Exception:
+            continue
+
+    log.info(
+        "run_dask_suite shim: no default workload found. "
+        "Pass --task your.module:function."
+    )
+    return 0
+
+
+__all__ = ["create_cluster", "run", "run_dask_suite"]

@@ -15,7 +15,12 @@ Env:
 """
 
 from __future__ import annotations
-import argparse, hashlib, json, os, sys, zipfile
+import argparse
+import hashlib
+import json
+import os
+import sys
+import zipfile
 from pathlib import Path
 from urllib.request import urlopen, Request
 
