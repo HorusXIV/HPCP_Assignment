@@ -14,13 +14,13 @@ Build an HDF5 array from raw SDO/AIA FITS.
 Deps: sunpy, astropy, numpy, h5py, tqdm
 """
 
-import os
 import sys
 import csv
 import json
 import warnings
 from pathlib import Path
 from datetime import timezone, datetime
+import yaml
 
 import numpy as np
 import h5py
@@ -31,7 +31,6 @@ from tqdm import tqdm
 warnings.simplefilter("ignore", VerifyWarning)
 
 # ---------------- CONFIG ----------------
-import yaml
 
 with open("config.yaml") as f:
     cfg = yaml.safe_load(f)

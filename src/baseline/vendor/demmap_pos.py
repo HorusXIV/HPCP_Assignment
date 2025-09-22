@@ -1,7 +1,7 @@
 import numpy as np
 from numpy import diag
-from .dem_inv_gsvd import dem_inv_gsvd
-from .dem_reg_map import dem_reg_map
+from dem_inv_gsvd import dem_inv_gsvd
+from dem_reg_map import dem_reg_map
 import concurrent.futures
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from tqdm import tqdm

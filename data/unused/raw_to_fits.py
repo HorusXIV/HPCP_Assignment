@@ -22,6 +22,7 @@ import warnings
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import timezone
+import yaml
 
 import numpy as np
 from astropy.io import fits
@@ -32,8 +33,6 @@ from tqdm import tqdm
 warnings.simplefilter("ignore", VerifyWarning)
 
 # ====================== CONFIG ======================
-import yaml
-from pathlib import Path
 
 with open("config.yaml") as f:
     cfg = yaml.safe_load(f)
@@ -229,7 +228,7 @@ def main():
     print(f"aiapy.register active: {_USE_AIAPY}")
     groups = choose_groups()  # {(date_str, tstr): {wl: path, ...}}
     if not groups:
-        print(f"[INFO] No usable raw files found.")
+        print("[INFO] No usable raw files found.")
         return
 
     # keep only complete sets (all 6 bands)
