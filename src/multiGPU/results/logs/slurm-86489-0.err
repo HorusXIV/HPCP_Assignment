@@ -1,85 +1,0 @@
---------------------------------------------------------------------------
-A requested component was not found, or was unable to be opened.  This
-means that this component is either not installed or is unable to be
-used on your system (e.g., sometimes this means that shared libraries
-that the component requires are unable to be found/loaded).  Note that
-PMIx stopped checking at the first component that it did not find.
-
-Host:      server0101
-Framework: psec
-Component: munge
---------------------------------------------------------------------------
-
---------------------------------------------------------------------------
-A requested component was not found, or was unable to be opened.  This
-means that this component is either not installed or is unable to be
-used on your system (e.g., sometimes this means that shared libraries
-that the component requires are unable to be found/loaded).  Note that
-PMIx stopped checking at the first component that it did not find.
-
-Host:      server0101
-Framework: psec
-Component: munge
---------------------------------------------------------------------------
-
---------------------------------------------------------------------------
-A requested component was not found, or was unable to be opened.  This
-means that this component is either not installed or is unable to be
-used on your system (e.g., sometimes this means that shared libraries
-that the component requires are unable to be found/loaded).  Note that
-PMIx stopped checking at the first component that it did not find.
-
-Host:      server0101
-Framework: psec
-Component: munge
---------------------------------------------------------------------------
-
---------------------------------------------------------------------------
-A requested component was not found, or was unable to be opened.  This
-means that this component is either not installed or is unable to be
-used on your system (e.g., sometimes this means that shared libraries
-that the component requires are unable to be found/loaded).  Note that
-PMIx stopped checking at the first component that it did not find.
-
-Host:      server0101
-Framework: psec
-Component: munge
---------------------------------------------------------------------------
-
-2025-09-19 16:36:30,954 - rank=- - INFO - __main__ - Starting rank 0/2; results dir: src/multiGPU/results
-2025-09-19 16:36:32,226 - rank=- - INFO - numba.cuda.cudadrv.driver - init
-2025-09-19 16:36:32,499 - rank=- - INFO - __main__ - Rank 0: starting processing input data/np32/20170906_12_00_12.npz
-  0%|          | 0.00/5.00 [00:00<?, ? x10^2 DEM/s] 60%|██████    | 3.00/5.00 [00:00<00:00, 29.8 x10^2 DEM/s]100%|██████████| 5.00/5.00 [00:00<00:00, 30.7 x10^2 DEM/s]
-  0%|          | 0.00/5.00 [00:00<?, ? x10^2 DEM/s] 40%|████      | 2.00/5.00 [00:00<00:00, 14.4 x10^2 DEM/s]100%|██████████| 5.00/5.00 [00:00<00:00, 26.9 x10^2 DEM/s]
-2025-09-19 16:36:33,944 - rank=- - INFO - __main__ - Rank 0: processed 500 pixels on CPU fallback
-2025-09-19 16:36:33,944 - rank=- - INFO - __main__ - Rank 0: finished input data/np32/20170906_12_00_12.npz in 1.44s (CPU)
-2025-09-19 16:36:33,959 - rank=- - INFO - __main__ - Rank 0: saved local results to src/multiGPU/results/rank000/dem_local_20170906_12_00_12.npz
-2025-09-19 16:36:33,976 - rank=- - INFO - __main__ - Saved aggregated DEMs to src/multiGPU/results/aggregate/dem_all_20170906_12_00_12.npz
-2025-09-19 16:36:33,996 - rank=- - INFO - __main__ - Rank 0: starting processing input data/np32/20170906_12_00_36.npz
-  0%|          | 0.00/5.00 [00:00<?, ? x10^2 DEM/s] 40%|████      | 2.00/5.00 [00:00<00:00, 17.3 x10^2 DEM/s]100%|██████████| 5.00/5.00 [00:00<00:00, 27.5 x10^2 DEM/s]
-  0%|          | 0.00/5.00 [00:00<?, ? x10^2 DEM/s] 40%|████      | 2.00/5.00 [00:00<00:00, 18.4 x10^2 DEM/s]100%|██████████| 5.00/5.00 [00:00<00:00, 25.6 x10^2 DEM/s]
-2025-09-19 16:36:35,226 - rank=- - INFO - __main__ - Rank 0: processed 500 pixels on CPU fallback
-2025-09-19 16:36:35,227 - rank=- - INFO - __main__ - Rank 0: finished input data/np32/20170906_12_00_36.npz in 1.23s (CPU)
-2025-09-19 16:36:35,246 - rank=- - INFO - __main__ - Rank 0: saved local results to src/multiGPU/results/rank000/dem_local_20170906_12_00_36.npz
-2025-09-19 16:36:35,304 - rank=- - INFO - __main__ - Saved aggregated DEMs to src/multiGPU/results/aggregate/dem_all_20170906_12_00_36.npz
-2025-09-19 16:36:35,318 - rank=- - INFO - __main__ - Rank 0: starting processing input data/np32/20170906_12_01_00.npz
-  0%|          | 0.00/5.00 [00:00<?, ? x10^2 DEM/s] 60%|██████    | 3.00/5.00 [00:00<00:00, 29.4 x10^2 DEM/s]100%|██████████| 5.00/5.00 [00:00<00:00, 37.6 x10^2 DEM/s]
-  0%|          | 0.00/5.00 [00:00<?, ? x10^2 DEM/s] 80%|████████  | 4.00/5.00 [00:00<00:00, 37.0 x10^2 DEM/s]100%|██████████| 5.00/5.00 [00:00<00:00, 31.9 x10^2 DEM/s]
-2025-09-19 16:36:36,574 - rank=- - INFO - __main__ - Rank 0: processed 500 pixels on CPU fallback
-2025-09-19 16:36:36,574 - rank=- - INFO - __main__ - Rank 0: finished input data/np32/20170906_12_01_00.npz in 1.26s (CPU)
-2025-09-19 16:36:36,590 - rank=- - INFO - __main__ - Rank 0: saved local results to src/multiGPU/results/rank000/dem_local_20170906_12_01_00.npz
-2025-09-19 16:36:36,604 - rank=- - INFO - __main__ - Saved aggregated DEMs to src/multiGPU/results/aggregate/dem_all_20170906_12_01_00.npz
-2025-09-19 16:36:36,619 - rank=- - INFO - __main__ - Rank 0: starting processing input data/np32/20170906_12_01_24.npz
-  0%|          | 0.00/5.00 [00:00<?, ? x10^2 DEM/s] 60%|██████    | 3.00/5.00 [00:00<00:00, 29.5 x10^2 DEM/s]100%|██████████| 5.00/5.00 [00:00<00:00, 33.7 x10^2 DEM/s]
-  0%|          | 0.00/5.00 [00:00<?, ? x10^2 DEM/s] 60%|██████    | 3.00/5.00 [00:00<00:00, 24.1 x10^2 DEM/s]100%|██████████| 5.00/5.00 [00:00<00:00, 31.2 x10^2 DEM/s]
-2025-09-19 16:36:37,832 - rank=- - INFO - __main__ - Rank 0: processed 500 pixels on CPU fallback
-2025-09-19 16:36:37,832 - rank=- - INFO - __main__ - Rank 0: finished input data/np32/20170906_12_01_24.npz in 1.21s (CPU)
-2025-09-19 16:36:37,847 - rank=- - INFO - __main__ - Rank 0: saved local results to src/multiGPU/results/rank000/dem_local_20170906_12_01_24.npz
-2025-09-19 16:36:37,868 - rank=- - INFO - __main__ - Saved aggregated DEMs to src/multiGPU/results/aggregate/dem_all_20170906_12_01_24.npz
-2025-09-19 16:36:37,885 - rank=- - INFO - __main__ - Rank 0: starting processing input data/np32/20170906_12_01_48.npz
-  0%|          | 0.00/5.00 [00:00<?, ? x10^2 DEM/s] 40%|████      | 2.00/5.00 [00:00<00:00, 19.7 x10^2 DEM/s]100%|██████████| 5.00/5.00 [00:00<00:00, 32.4 x10^2 DEM/s]
-  0%|          | 0.00/5.00 [00:00<?, ? x10^2 DEM/s] 60%|██████    | 3.00/5.00 [00:00<00:00, 26.2 x10^2 DEM/s]100%|██████████| 5.00/5.00 [00:00<00:00, 23.6 x10^2 DEM/s]
-2025-09-19 16:36:39,173 - rank=- - INFO - __main__ - Rank 0: processed 500 pixels on CPU fallback
-2025-09-19 16:36:39,173 - rank=- - INFO - __main__ - Rank 0: finished input data/np32/20170906_12_01_48.npz in 1.29s (CPU)
-2025-09-19 16:36:39,187 - rank=- - INFO - __main__ - Rank 0: saved local results to src/multiGPU/results/rank000/dem_local_20170906_12_01_48.npz
-2025-09-19 16:36:39,200 - rank=- - INFO - __main__ - Saved aggregated DEMs to src/multiGPU/results/aggregate/dem_all_20170906_12_01_48.npz

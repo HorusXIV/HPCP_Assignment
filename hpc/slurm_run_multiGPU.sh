@@ -86,7 +86,7 @@ singularity exec --cleanenv --nv --bind "$REPO_DIR":/workspace "$IMAGE" \
       then poetry install --no-interaction --no-ansi
     fi"
 
-srun --mpi=pmix -n ${NTASKS} \
+srun --mpi=pmix --PMIX_MCA_psec=^munge -n ${NTASKS} \
   singularity exec --nv --bind "$REPO_DIR":/workspace "$IMAGE" \
   poetry run python -m ${ENTRY} --input-dir data/np32
 

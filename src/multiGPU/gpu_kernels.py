@@ -6,6 +6,7 @@ same function signatures as the original vendor code where practical.
 """
 from typing import Tuple
 import numpy as np
+import logging
 
 # module-level alias used by functions below
 _np = np
@@ -41,8 +42,9 @@ def safe_svd(A: np.ndarray, full_matrices: bool = True, compute_uv: bool = True)
         try:
             u, s, vh = cp.linalg.svd(A_gpu, full_matrices=full_matrices)
             return cp.asnumpy(u), cp.asnumpy(s), cp.asnumpy(vh)
-        except Exception:
+        except Exception as exc:
             # fallback to CPU
+            logging.getLogger(__name__).exception("GPU kernel failed, falling back to CPU: %s", exc)
             pass
 
     # CPU fallback
@@ -196,8 +198,13 @@ def dem_pix(dnin, ednin, rmatrix, logt, dlogt, glc, reg_tweak=1.0,
                 A_d = rmatrixin_d.T
                 AB1_d = A_d @ cp.linalg.pinv(B_d)
                 sze0 = AB1_d.shape
-                C_d = cp.zeros((max(sze0), max(sze0)), dtype=cp.float64)
-                C_d[:sze0[0], :sze0[1]] = AB1_d
+                try:
+                    C_d = cp.zeros((max(sze0), max(sze0)), dtype=cp.float64)
+                    C_d[:sze0[0], :sze0[1]] = AB1_d
+                except Exception as e:
+                    logging.getLogger(__name__).exception("GPU allocation for C_d failed: %s", e)
+                    # re-raise so outer handler will record a consistent fallback
+                    raise
 
                 u_d, s_d, vh_d = cp.linalg.svd(C_d, full_matrices=True)
 
@@ -246,8 +253,12 @@ def dem_pix(dnin, ednin, rmatrix, logt, dlogt, glc, reg_tweak=1.0,
             B_d = L_d
             AB1_d = A_d @ cp.linalg.pinv(B_d)
             sze0 = AB1_d.shape
-            C_d = cp.zeros((max(sze0), max(sze0)), dtype=cp.float64)
-            C_d[:sze0[0], :sze0[1]] = AB1_d
+            try:
+                C_d = cp.zeros((max(sze0), max(sze0)), dtype=cp.float64)
+                C_d[:sze0[0], :sze0[1]] = AB1_d
+            except Exception as e:
+                logging.getLogger(__name__).exception("GPU allocation for C_d failed: %s", e)
+                raise
             u_d, s_d, vh_d = cp.linalg.svd(C_d, full_matrices=True)
 
             alpha_d = s_d * (1.0 / cp.sqrt(1.0 + s_d ** 2))
@@ -307,9 +318,9 @@ def dem_pix(dnin, ednin, rmatrix, logt, dlogt, glc, reg_tweak=1.0,
                 chisq = _np.sum(((dnin - dn_reg) / ednin) ** 2) / nf
 
             return dem, edem, elogt, chisq, dn_reg
-        except Exception:
-            # If anything fails on the GPU path, fall back to CPU implementation
-            pass
+        except Exception as e:
+            # If anything fails on the GPU path, log full traceback and fall back to CPU
+            logging.getLogger(__name__).exception("GPU path failed, falling back to CPU: %s", e)
 
     # basic checks (CPU fallback)
     if (_np.sum(_np.isnan(dn)) == 0 and _np.sum(_np.isinf(dn)) == 0 and _np.prod(dn) > 0):
@@ -423,95 +434,110 @@ def demmap_pos(dd, ed, rmatrix, logt, dlogt, glc,
             ed_d = cp.asarray(ed, dtype=cp.float64)
             rmatrix_d = cp.asarray(rmatrix, dtype=cp.float64)
 
-            # Batch over pixels to perform batched SVDs
+            # Batch over pixels to perform batched SVDs with adaptive retries
             batch_size = 64
+            initial_batch = batch_size
             nt_dev = rmatrix_d.shape[0]
             nf_dev = rmatrix_d.shape[1]
 
-            for b0 in range(0, na, batch_size):
-                b1 = min(na, b0 + batch_size)
-                b = b1 - b0
+            b0 = 0
+            while b0 < na:
+                cur_batch = min(batch_size, na - b0)
+                b1 = b0 + cur_batch
+                try:
+                    dn_b = dd_d[b0:b1, :]  # (b, nf)
+                    ed_b = ed_d[b0:b1, :]  # (b, nf)
 
-                dn_b = dd_d[b0:b1, :]  # (b, nf)
-                ed_b = ed_d[b0:b1, :]  # (b, nf)
+                    # build rmatrixin per pixel: shape (b, nt, nf)
+                    inv_ed = 1.0 / ed_b  # (b, nf)
+                    rmatrix_expand = rmatrix_d[None, :, :]  # (1, nt, nf)
+                    inv_ed_expand = inv_ed[:, None, :]      # (b, 1, nf)
+                    rmatrixin_b = rmatrix_expand * inv_ed_expand  # (b, nt, nf)
 
-                # build rmatrixin per pixel: shape (b, nt, nf)
-                inv_ed = 1.0 / ed_b  # (b, nf)
-                rmatrix_expand = rmatrix_d[None, :, :]  # (1, nt, nf)
-                inv_ed_expand = inv_ed[:, None, :]      # (b, 1, nf)
-                rmatrixin_b = rmatrix_expand * inv_ed_expand  # (b, nt, nf)
+                    # A_batch: (b, nf, nt)
+                    A_batch = cp.transpose(rmatrixin_b, (0, 2, 1))
 
-                # A_batch: (b, nf, nt)
-                A_batch = cp.transpose(rmatrixin_b, (0, 2, 1))
+                    # Constant B = L from dlogt
+                    dlogt_d = cp.asarray(dlogt, dtype=cp.float64)
+                    L = cp.diag(1.0 / cp.sqrt(dlogt_d))
+                    B_inv = cp.linalg.pinv(L)
 
-                # Constant B = L from dlogt
-                dlogt_d = cp.asarray(dlogt, dtype=cp.float64)
-                L = cp.diag(1.0 / cp.sqrt(dlogt_d))
-                B_inv = cp.linalg.pinv(L)
+                    # AB1 per pixel: (b, nf, nt)
+                    AB1 = A_batch @ B_inv
 
-                # AB1 per pixel: (b, nf, nt)
-                AB1 = A_batch @ B_inv
+                    # Form square C matrices for SVD: (b, M, M)
+                    M = max(AB1.shape[1], AB1.shape[2])
+                    C = cp.zeros((cur_batch, M, M), dtype=cp.float64)
+                    C[:, :AB1.shape[1], :AB1.shape[2]] = AB1
 
-                # Form square C matrices for SVD: (b, M, M)
-                M = max(AB1.shape[1], AB1.shape[2])
-                C = cp.zeros((b, M, M), dtype=cp.float64)
-                C[:, :AB1.shape[1], :AB1.shape[2]] = AB1
+                    # Batched SVD on device
+                    u_b, s_b, vh_b = cp.linalg.svd(C, full_matrices=True)
 
-                # Batched SVD on device
-                u_b, s_b, vh_b = cp.linalg.svd(C, full_matrices=True)
+                    # alpha/beta per pixel
+                    beta_b = 1.0 / cp.sqrt(1.0 + s_b ** 2)
+                    alpha_b = s_b * beta_b
 
-                # alpha/beta per pixel
-                beta_b = 1.0 / cp.sqrt(1.0 + s_b ** 2)
-                alpha_b = s_b * beta_b
+                    # We'll compute per-pixel W and lambda on host (small matrices)
+                    alpha_cpu = cp.asnumpy(alpha_b)
+                    beta_cpu = cp.asnumpy(beta_b)
+                    u_cpu = cp.asnumpy(u_b)
+                    vh_cpu = cp.asnumpy(vh_b)
+                    B_host = cp.asnumpy(L)
 
-                # We'll compute per-pixel W and lambda on host (small matrices)
-                alpha_cpu = cp.asnumpy(alpha_b)
-                beta_cpu = cp.asnumpy(beta_b)
-                u_cpu = cp.asnumpy(u_b)
-                vh_cpu = cp.asnumpy(vh_b)
-                B_host = cp.asnumpy(L)
+                    for j in range(cur_batch):
+                        sva = alpha_cpu[j]
+                        svb = beta_cpu[j]
+                        U_cpu = u_cpu[j]
+                        vh_j = vh_cpu[j]
 
-                for j in range(b):
-                    sva = alpha_cpu[j]
-                    svb = beta_cpu[j]
-                    U_cpu = u_cpu[j]
-                    vh_j = vh_cpu[j]
+                        # compute SB and its inverse on host
+                        SB = np.diag(svb)
+                        try:
+                            SB_inv = np.linalg.pinv(SB)
+                        except Exception:
+                            SB_inv = np.linalg.pinv(SB + 1e-12 * np.eye(SB.shape[0]))
 
-                    # compute SB and its inverse on host
-                    SB = np.diag(svb)
-                    try:
-                        SB_inv = np.linalg.pinv(SB)
-                    except Exception:
-                        SB_inv = np.linalg.pinv(SB + 1e-12 * np.eye(SB.shape[0]))
+                        # compute W on host then move to device
+                        W_host = np.linalg.pinv(SB_inv @ vh_j.T @ B_host)
+                        W_d = cp.asarray(W_host)
 
-                    # compute W on host then move to device
-                    W_host = np.linalg.pinv(SB_inv @ vh_j.T @ B_host)
-                    W_d = cp.asarray(W_host)
+                        # pick lambda via dem_reg_map on host
+                        lamb = dem_reg_map(sva, svb, U_cpu, W_host, cp.asnumpy(dn_b[j]), cp.asnumpy(ed_b[j]), reg_tweak, nmu)
 
-                    # pick lambda via dem_reg_map on host
-                    lamb = dem_reg_map(sva, svb, U_cpu, W_host, cp.asnumpy(dn_b[j]), cp.asnumpy(ed_b[j]), reg_tweak, nmu)
+                        # compute filter and kdag on device
+                        alpha_d = cp.asarray(sva)
+                        beta_d = cp.asarray(svb)
+                        filt = cp.zeros((nf_dev, nt_dev), dtype=cp.float64)
+                        for kk in range(nf_dev):
+                            filt[kk, kk] = (alpha_d[kk] / (alpha_d[kk] ** 2 + beta_d[kk] ** 2 * lamb))
 
-                    # compute filter and kdag on device
-                    alpha_d = cp.asarray(sva)
-                    beta_d = cp.asarray(svb)
-                    filt = cp.zeros((nf_dev, nt_dev), dtype=cp.float64)
-                    for kk in range(nf_dev):
-                        filt[kk, kk] = (alpha_d[kk] / (alpha_d[kk] ** 2 + beta_d[kk] ** 2 * lamb))
+                        u_d = u_b[j]
+                        kdag_d = W_d @ (filt.T @ u_d[:nf_dev, :nf_dev])
+                        dem_out_d = (kdag_d @ dn_b[j, :]).squeeze()
 
-                    u_d = u_b[j]
-                    kdag_d = W_d @ (filt.T @ u_d[:nf_dev, :nf_dev])
-                    dem_out_d = (kdag_d @ dn_b[j, :]).squeeze()
+                        dem[b0 + j, :] = cp.asnumpy(dem_out_d)
+                        dn_reg[b0 + j, :] = cp.asnumpy((rmatrix_d.T @ dem_out_d).squeeze())
+                        residuals = (cp.asnumpy(dd[b0 + j, :]) - dn_reg[b0 + j, :]) / cp.asnumpy(ed[b0 + j, :])
+                        chisq[b0 + j] = np.sum(residuals ** 2) / dd.shape[1]
+                        edem[b0 + j, :] = np.abs(dem[b0 + j, :]) * 0.1
 
-                    dem[b0 + j, :] = cp.asnumpy(dem_out_d)
-                    dn_reg[b0 + j, :] = cp.asnumpy((rmatrix_d.T @ dem_out_d).squeeze())
-                    residuals = (cp.asnumpy(dd[b0 + j, :]) - dn_reg[b0 + j, :]) / cp.asnumpy(ed[b0 + j, :])
-                    chisq[b0 + j] = np.sum(residuals ** 2) / dd.shape[1]
-                    edem[b0 + j, :] = np.abs(dem[b0 + j, :]) * 0.1
+                    # advance to next block and (optionally) restore batch_size
+                    b0 = b1
+                    batch_size = initial_batch
+                except Exception as e:
+                    # Log and reduce batch size on memory/allocation failures
+                    logging.getLogger(__name__).exception("GPU block %d:%d failed: %s", b0, b1, e)
+                    if cur_batch <= 1:
+                        logging.getLogger(__name__).exception("Minimum batch size reached; aborting GPU path")
+                        raise
+                    # reduce batch and retry the same start index
+                    batch_size = max(1, cur_batch // 2)
+                    logging.getLogger(__name__).warning("Reducing GPU batch size to %d and retrying", batch_size)
 
             return dem, edem, elogt, chisq, dn_reg
-        except Exception:
-            # If anything fails on the GPU path, fall back to CPU implementation
-            pass
+        except Exception as e:
+            # If anything fails on the GPU path, log full traceback and fall back to CPU
+            logging.getLogger(__name__).exception("GPU path failed, falling back to CPU: %s", e)
 
     for i in range(na):
         dem_i, edem_i, elogt_i, chisq_i, dn_reg_i = dem_pix(
