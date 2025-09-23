@@ -52,6 +52,13 @@ if command -v nvidia-smi &>/dev/null; then
   nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv
 fi
 
+
+export CUPY_DUMP_CUDA_SOURCE_ON_ERROR=1
+export CUPY_NVRTC_LOGLEVEL=info
+export CUPY_CACHE_DIR="/workspace/.cupy_cache"
+export CUPY_COMPILE_WITH_PTX=1
+
+
 # Launch with srun on the host and have srun invoke singularity per task.
 # This avoids requiring `srun` inside the container image.
 # Compute a safe NTASKS: prefer SLURM_NTASKS if provided, otherwise derive from
@@ -86,9 +93,9 @@ singularity exec --cleanenv --nv --bind "$REPO_DIR":/workspace "$IMAGE" \
       then poetry install --no-interaction --no-ansi
     fi"
 
-srun --mpi=pmix --PMIX_MCA_psec=^munge -n ${NTASKS} \
+srun --mpi=pmix -n ${NTASKS} \
   singularity exec --nv --bind "$REPO_DIR":/workspace "$IMAGE" \
-  poetry run python -m ${ENTRY} --input-dir data/np32
+  poetry run python -m ${ENTRY} --input-dir data/np32 --max-samples 1000
 
 EXIT_CODE=$?
 if [[ ${EXIT_CODE} -ne 0 ]]; then

@@ -1,11 +1,15 @@
 Bootstrap: docker
-From: nvidia/cuda:12.8.1-runtime-ubuntu22.04
+From: nvidia/cuda:12.8.1-devel-ubuntu22.04
 Stage: build
 
 %environment
     # General settings
     export LC_ALL=C
     export DEBIAN_FRONTEND=noninteractive
+    # Ensure CUDA toolkit paths are available for NVRTC and runtime compilation
+    export CUDA_HOME=/usr/local/cuda
+    export PATH=$CUDA_HOME/bin:$PATH
+    export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
 
     # Default versions (can be overridden)
     export PYTHON_VERSION=3.12.8
@@ -34,6 +38,8 @@ Stage: build
     export PIPX_HOME=/opt/pipx
     export PIPX_BIN_DIR=/usr/local/bin
     export PATH="/usr/local/bin:$PATH"
+
+    export PMIX_MCA_psec=native
 
 
     # Prepare package sources and add extra repositories.

@@ -37,7 +37,9 @@ def _make_formatter():
     # `rank`.
 
     class SafeFormatter(logging.Formatter):
-        def format(self, record: logging.LogRecord) -> str:  # type: ignore[override]
+        def format(
+            self, record: logging.LogRecord
+        ) -> str:  # type: ignore[override]
             if not hasattr(record, "rank"):
                 # attach a safe default if missing
                 setattr(record, "rank", "-")
@@ -63,24 +65,6 @@ def setup_logging(
     os.makedirs(results_dir, exist_ok=True)
     log_queue = multiprocessing.Queue(-1)
 
-    # Create the queue listener only on rank 0 (aggregator)
-    if rank == 0:
-        handlers = []
-        # aggregated log file
-        agg_logfile = os.path.join(results_dir, "logs", "aggregated.log")
-        os.makedirs(os.path.dirname(agg_logfile), exist_ok=True)
-        fh = logging.FileHandler(agg_logfile, mode="a")
-        fh.setFormatter(_make_formatter())
-        handlers.append(fh)
-
-        # Console handler for rank 0
-        ch = logging.StreamHandler()
-        ch.setFormatter(_make_formatter())
-        handlers.append(ch)
-
-        _listener = logging.handlers.QueueListener(log_queue, *handlers)
-        _listener.start()
-
     # Configure per-process root logger to send to queue
     qh = logging.handlers.QueueHandler(log_queue)
     root = logging.getLogger()
@@ -105,13 +89,6 @@ def setup_logging(
     # This bypasses the queue to help ensure process-local logs are written
     # even if the queue listener stops unexpectedly.
     root.addHandler(fh_rank)
-
-    # Optional: console per rank (useful for debugging small runs)
-    if console and rank != 0:
-        ch = logging.StreamHandler()
-        ch.setFormatter(_make_formatter())
-        ch.addFilter(RankFilter(rank))
-        root.addHandler(ch)
 
     return root
 

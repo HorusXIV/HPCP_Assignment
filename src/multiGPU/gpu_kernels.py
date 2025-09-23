@@ -11,15 +11,17 @@ import logging
 # module-level alias used by functions below
 _np = np
 
-# Try to import CuPy and numba.cuda; otherwise provide fallbacks
+# CuPy and numba.cuda are required for multi-GPU kernels. Fail loudly if
+# they are not importable so callers do not silently fall back to CPU.
 try:
     import cupy as cp
-    from numba import cuda
-    GPU_AVAILABLE = True
-except Exception:
-    cp = None
-    cuda = None
-    GPU_AVAILABLE = False
+except Exception as e:
+    raise ImportError(
+        "CuPy is required for multiGPU execution. " f"Original error: {e}"
+    ) from e
+
+# We require GPU for this module
+GPU_AVAILABLE = True
 
 try:
     import scipy.linalg as sla
@@ -28,39 +30,30 @@ except Exception:
 
 
 def _to_device(x):
-    return cp.asarray(x) if GPU_AVAILABLE else x
+    return cp.asarray(x)
 
 
-def safe_svd(A: np.ndarray, full_matrices: bool = True, compute_uv: bool = True) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def safe_svd(
+    A: np.ndarray,
+    full_matrices: bool = True,
+    compute_uv: bool = True,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Compute SVD on GPU when possible, otherwise use SciPy/NumPy.
 
     This mirrors the behavior of baseline/vendor/dem_inv_gsvd.safe_svd but
     uses CuPy's linalg when available for acceleration.
     """
-    if GPU_AVAILABLE:
-        A_gpu = _to_device(np.asarray(A, dtype=np.float64, order="C"))
-        try:
-            u, s, vh = cp.linalg.svd(A_gpu, full_matrices=full_matrices)
-            return cp.asnumpy(u), cp.asnumpy(s), cp.asnumpy(vh)
-        except Exception as exc:
-            # fallback to CPU
-            logging.getLogger(__name__).exception("GPU kernel failed, falling back to CPU: %s", exc)
-            pass
-
-    # CPU fallback
-    A = np.asarray(A, dtype=np.float64, order="C")
-    if sla is not None:
-        try:
-            return sla.svd(A, full_matrices=full_matrices, compute_uv=compute_uv, lapack_driver="gesvd", check_finite=False)
-        except Exception:
-            try:
-                return sla.svd(A, full_matrices=full_matrices, compute_uv=compute_uv, lapack_driver="gesdd", check_finite=False)
-            except Exception:
-                import numpy.linalg as npl
-                return npl.svd(A, full_matrices=full_matrices, compute_uv=compute_uv)
-    else:
-        import numpy.linalg as npl
-        return npl.svd(A, full_matrices=full_matrices, compute_uv=compute_uv)
+    # Run SVD on GPU and return numpy arrays. Raise on failure so callers
+    # cannot silently continue on CPU.
+    A_gpu = _to_device(np.asarray(A, dtype=np.float64, order="C"))
+    try:
+        u, s, vh = cp.linalg.svd(A_gpu, full_matrices=full_matrices)
+        return cp.asnumpy(u), cp.asnumpy(s), cp.asnumpy(vh)
+    except Exception as exc:
+        logging.getLogger(__name__).exception("GPU SVD failed: %s", exc)
+        raise RuntimeError(
+            "CuPy SVD failed; aborting multiGPU execution."
+        ) from exc
 
 
 def safe_pinv(A: np.ndarray, rcond: float = 1e-12) -> np.ndarray:
@@ -130,15 +123,34 @@ def dem_reg_map(sigmaa, sigmab, U, W, data, err, reg_tweak, nmu=500):
         if not (maxx > minx):
             maxx = minx * 10.0
 
+    # Defensive handling: callers sometimes pass the full `u` matrix from SVD
+    # (shape M x M) instead of the expected `U` shaped like u.T[:, :nf]. Try
+    # to adapt the common mistake automatically; otherwise raise a clear
+    # error.
+    U_arr = xp.asarray(U)
+    if U_arr.ndim != 2:
+        raise ValueError(f"U must be 2D, got ndim={U_arr.ndim}")
+    # If second axis doesn't match data length, but caller passed full square
+    # u (M x M) we can transpose and slice to obtain u.T[:, :nf]
+    if U_arr.shape[1] != nf:
+        if U_arr.shape[0] == U_arr.shape[1] and U_arr.shape[0] >= nf:
+            U_arr = U_arr.T[:, :nf]
+        else:
+            shape = tuple(U_arr.shape)
+            raise ValueError(
+                f"Incompatible U shape {shape} for len {nf}. "
+                + "Expected second dimension == data length or square matrix."
+            )
+
     nmu_eff = max(int(nmu), 2)
-    # generate mu as geometric spacing (on CPU to avoid NaN issues in older cupy)
+    # generate mu as geometric spacing (on CPU to avoid NaNs in older cupy)
     mu = np.geomspace(minx, maxx, num=nmu_eff, dtype=float)
     mu_xp = xp.asarray(mu)
 
     # Compute coefficients and discr in a vectorized way
     arg = xp.zeros((nreg, nmu_eff), dtype=float)
     for kk in range(nf):
-        Uk = xp.asarray(U[kk, :])
+        Uk = xp.asarray(U_arr[kk, :])
         coef = data @ Uk
         sb = xp.asarray(sigmab[kk])
         sa = xp.asarray(sigmaa[kk])
@@ -155,256 +167,15 @@ def dem_reg_map(sigmaa, sigmab, U, W, data, err, reg_tweak, nmu=500):
     return opt
 
 
-def dem_pix(dnin, ednin, rmatrix, logt, dlogt, glc, reg_tweak=1.0,
-            max_iter=10, rgt_fact=1.5, dem_norm0=0, nmu=42, warn=True,
-            l_emd=False, rscl=False):
-    """GPU-aware single-pixel DEM inversion mirroring baseline.dem_pix.
-
-    This function keeps control logic on the CPU but uses GPU-accelerated
-    linear algebra where available via dem_inv_gsvd and dem_reg_map.
+def dem_pix(*args, **kwargs):
+    """Single-pixel DEM is provided via GPU paths; this function is a stub
+    in multiGPU mode. Use `demmap_pos` for batched GPU execution.
     """
-    # use module-level numpy alias
-
-    nf = rmatrix.shape[1]
-    nt = logt.shape[0]
-
-    # prepare scaled matrix like baseline
-    rmatrixin = _np.zeros((nt, nf))
-    for kk in range(nf):
-        rmatrixin[:, kk] = rmatrix[:, kk] / ednin[kk]
-
-    dn = dnin / ednin
-    edn = ednin / ednin
-
-    # If a GPU is available, run the heavy linear algebra on-device to
-    # avoid round-trip host/device transfers. We keep a CPU fallback path
-    # that mirrors the original algorithm.
-    if GPU_AVAILABLE:
-        try:
-            # move small working arrays to device
-            rmatrixin_d = cp.asarray(rmatrixin, dtype=cp.float64)
-            dn_d = cp.asarray(dn, dtype=cp.float64)
-            edn_d = cp.asarray(edn, dtype=cp.float64)
-
-            # initial weighting and L computation on device
-            if (hasattr(dem_norm0, '__len__') and _np.prod(dem_norm0) != 1.0 and dem_norm0[0] != 0):
-                dem_reg_lwght_d = cp.asarray(dem_norm0, dtype=cp.float64)
-            else:
-                dlogt_d = cp.asarray(dlogt, dtype=cp.float64)
-                L_d = cp.diag(1.0 / cp.sqrt(dlogt_d))
-
-                # compute GSVD-like step on device: use pinv and SVD on C
-                B_d = cp.asarray(L_d, dtype=cp.float64)
-                A_d = rmatrixin_d.T
-                AB1_d = A_d @ cp.linalg.pinv(B_d)
-                sze0 = AB1_d.shape
-                try:
-                    C_d = cp.zeros((max(sze0), max(sze0)), dtype=cp.float64)
-                    C_d[:sze0[0], :sze0[1]] = AB1_d
-                except Exception as e:
-                    logging.getLogger(__name__).exception("GPU allocation for C_d failed: %s", e)
-                    # re-raise so outer handler will record a consistent fallback
-                    raise
-
-                u_d, s_d, vh_d = cp.linalg.svd(C_d, full_matrices=True)
-
-                beta_d = 1.0 / cp.sqrt(1.0 + s_d ** 2)
-                alpha_d = s_d * beta_d
-
-                SB_d = cp.diag(beta_d)
-                SB_inv_d = cp.linalg.pinv(SB_d)
-                W_d = cp.linalg.pinv(SB_inv_d @ vh_d.T @ B_d)
-
-                # select first approximation for dem_reg_lwght
-                # compute lamb using CPU dem_reg_map (small cost) by copying
-                sva = cp.asnumpy(alpha_d)
-                svb = cp.asnumpy(beta_d)
-                U = cp.asnumpy(u_d)
-                W = cp.asnumpy(W_d)
-                lamb = dem_reg_map(sva, svb, U, W, cp.asnumpy(dn_d), cp.asnumpy(edn_d), reg_tweak, nmu)
-
-                # compute kdag on device
-                filt_d = cp.zeros((nf, nt), dtype=cp.float64)
-                for kk in range(nf):
-                    filt_d[kk, kk] = (alpha_d[kk] / (alpha_d[kk] ** 2 + beta_d[kk] ** 2 * lamb))
-                kdag_d = W_d @ (filt_d.T @ u_d[:nf, :nf])
-                dr0_d = (kdag_d @ dn_d).squeeze()
-
-                fcofmax = 1e-4
-                mask_d = (dr0_d > 0) & (dr0_d > fcofmax * cp.max(dr0_d))
-                dem_reg_lwght_d = cp.ones(nt, dtype=cp.float64)
-                dem_reg_lwght_d[mask_d] = dr0_d[mask_d]
-                # smooth on host for convenience
-                dem_reg_lwght = cp.asnumpy(dem_reg_lwght_d)
-                dem_reg_lwght = _np.convolve(dem_reg_lwght[1:-1], _np.ones(5) / 5)[1:-1]
-                dem_reg_lwght = dem_reg_lwght / _np.max(dem_reg_lwght)
-                dem_reg_lwght[dem_reg_lwght <= 1e-8] = 1e-8
-                dem_reg_lwght_d = cp.asarray(dem_reg_lwght, dtype=cp.float64)
-
-            # build L on device
-            if l_emd:
-                L_d = cp.diag(1.0 / cp.abs(dem_reg_lwght_d))
-            else:
-                dlogt_d = cp.asarray(dlogt, dtype=cp.float64)
-                L_d = cp.diag(cp.sqrt(dlogt_d) / cp.sqrt(cp.abs(dem_reg_lwght_d)))
-
-            # GSVD-like on device
-            A_d = rmatrixin_d.T
-            B_d = L_d
-            AB1_d = A_d @ cp.linalg.pinv(B_d)
-            sze0 = AB1_d.shape
-            try:
-                C_d = cp.zeros((max(sze0), max(sze0)), dtype=cp.float64)
-                C_d[:sze0[0], :sze0[1]] = AB1_d
-            except Exception as e:
-                logging.getLogger(__name__).exception("GPU allocation for C_d failed: %s", e)
-                raise
-            u_d, s_d, vh_d = cp.linalg.svd(C_d, full_matrices=True)
-
-            alpha_d = s_d * (1.0 / cp.sqrt(1.0 + s_d ** 2))
-            beta_d = 1.0 / cp.sqrt(1.0 + s_d ** 2)
-            SB_d = cp.diag(beta_d)
-            SB_inv_d = cp.linalg.pinv(SB_d)
-            W_d = cp.linalg.pinv(SB_inv_d @ vh_d.T @ B_d)
-
-            # positivity loop on device (but compute lamb on host via dem_reg_map)
-            piter = 0
-            rgt = reg_tweak
-            dem_reg_out_d = None
-            while piter < max_iter:
-                sva = cp.asnumpy(alpha_d)
-                svb = cp.asnumpy(beta_d)
-                U = cp.asnumpy(u_d)
-                W = cp.asnumpy(W_d)
-                lamb = dem_reg_map(sva, svb, U, W, cp.asnumpy(dn_d), cp.asnumpy(edn_d), rgt, nmu)
-
-                filt_d = cp.zeros((nf, nt), dtype=cp.float64)
-                for kk in range(nf):
-                    filt_d[kk, kk] = (alpha_d[kk] / (alpha_d[kk] ** 2 + beta_d[kk] ** 2 * lamb))
-                kdag_d = W_d @ (filt_d.T @ u_d[:nf, :nf])
-                dem_reg_out_d = (kdag_d @ dn_d).squeeze()
-
-                ndem = int(cp.sum(dem_reg_out_d < 0))
-                if ndem == 0:
-                    break
-                rgt = rgt_fact * rgt
-                piter += 1
-
-            # collect results back to host
-            dem = cp.asnumpy(dem_reg_out_d)
-            dn_reg = cp.asnumpy((rmatrix.T @ dem_reg_out_d).squeeze())
-            residuals = (dnin - dn_reg) / ednin
-            chisq = _np.sum(residuals ** 2) / nf
-
-            delxi2 = cp.asnumpy(kdag_d @ kdag_d.T)
-            edem = _np.sqrt(_np.diag(delxi2))
-
-            kdagk = cp.asnumpy(kdag_d @ rmatrixin_d.T)
-
-            elogt = _np.zeros(nt)
-            ltt = _np.min(logt) + 1e-8 + (_np.max(logt) - _np.min(logt)) * _np.arange(51) / (52 - 1.0)
-            for kk in range(nt):
-                rr = _np.interp(ltt, logt, kdagk[:, kk])
-                hm_mask = (rr >= _np.max(kdagk[:, kk]) / 2.0)
-                elogt[kk] = dlogt[kk]
-                if _np.sum(hm_mask) > 0:
-                    elogt[kk] = (ltt[hm_mask][-1] - ltt[hm_mask][0]) / 2
-
-            if rscl:
-                mnrat = _np.mean(dnin / dn_reg)
-                dem = dem * mnrat
-                edem = edem * mnrat
-                dn_reg = (rmatrix.T @ dem).squeeze()
-                chisq = _np.sum(((dnin - dn_reg) / ednin) ** 2) / nf
-
-            return dem, edem, elogt, chisq, dn_reg
-        except Exception as e:
-            # If anything fails on the GPU path, log full traceback and fall back to CPU
-            logging.getLogger(__name__).exception("GPU path failed, falling back to CPU: %s", e)
-
-    # basic checks (CPU fallback)
-    if (_np.sum(_np.isnan(dn)) == 0 and _np.sum(_np.isinf(dn)) == 0 and _np.prod(dn) > 0):
-        piter = 0
-        rgt = reg_tweak
-
-        # initial weighting
-        if (hasattr(dem_norm0, '__len__') and _np.prod(dem_norm0) != 1.0 and dem_norm0[0] != 0):
-            dem_reg_lwght = dem_norm0
-        else:
-            # simple initial L diag
-            L = _np.diag(1.0 / _np.sqrt(dlogt))
-            sva, svb, U, V, W = dem_inv_gsvd(rmatrixin.T, L)
-            lamb = dem_reg_map(sva, svb, U, W, dn, edn, rgt, nmu)
-            filt = _np.zeros((nf, nt))
-            for kk in range(nf):
-                filt[kk, kk] = (sva[kk] / (sva[kk] ** 2 + svb[kk] ** 2 * lamb))
-            kdag = W @ (filt.T @ U[:nf, :nf])
-            dr0 = (kdag @ dn).squeeze()
-            fcofmax = 1e-4
-            mask = _np.where((dr0 > 0) & (dr0 > fcofmax * _np.max(dr0)))[0]
-            dem_reg_lwght = _np.ones(nt)
-            dem_reg_lwght[mask] = dr0[mask]
-            dem_reg_lwght = _np.convolve(dem_reg_lwght[1:-1], _np.ones(5) / 5)[1:-1]
-            dem_reg_lwght = dem_reg_lwght / _np.max(dem_reg_lwght)
-            dem_reg_lwght[dem_reg_lwght <= 1e-8] = 1e-8
-
-        # build L
-        if l_emd:
-            L = _np.diag(1 / _np.abs(dem_reg_lwght))
-        else:
-            L = _np.diag(_np.sqrt(dlogt) / _np.sqrt(_np.abs(dem_reg_lwght)))
-
-        sva, svb, U, V, W = dem_inv_gsvd(rmatrixin.T, L)
-
-        # positivity loop
-        dem_reg_out = None
-        while (piter < max_iter):
-            lamb = dem_reg_map(sva, svb, U, W, dn, edn, rgt, nmu)
-            filt = _np.zeros((nf, nt))
-            for kk in range(nf):
-                filt[kk, kk] = (sva[kk] / (sva[kk] ** 2 + svb[kk] ** 2 * lamb))
-            kdag = W @ (filt.T @ U[:nf, :nf])
-            dem_reg_out = (kdag @ dn).squeeze()
-
-            ndem = len(dem_reg_out[dem_reg_out < 0])
-            if ndem == 0:
-                break
-            rgt = rgt_fact * rgt
-            piter += 1
-
-        if (warn and (piter == max_iter)):
-            print('Warning, positivity loop hit max iterations')
-
-        dem = dem_reg_out
-        dn_reg = (rmatrix.T @ dem_reg_out).squeeze()
-        residuals = (dnin - dn_reg) / ednin
-        chisq = _np.sum(residuals ** 2) / nf
-
-        delxi2 = kdag @ kdag.T
-        edem = _np.sqrt(_np.diag(delxi2))
-
-        kdagk = kdag @ rmatrixin.T
-
-        elogt = _np.zeros(nt)
-        ltt = _np.min(logt) + 1e-8 + (_np.max(logt) - _np.min(logt)) * _np.arange(51) / (52 - 1.0)
-        for kk in range(nt):
-            rr = _np.interp(ltt, logt, kdagk[:, kk])
-            hm_mask = (rr >= _np.max(kdagk[:, kk]) / 2.0)
-            elogt[kk] = dlogt[kk]
-            if _np.sum(hm_mask) > 0:
-                elogt[kk] = (ltt[hm_mask][-1] - ltt[hm_mask][0]) / 2
-
-        if rscl:
-            mnrat = _np.mean(dnin / dn_reg)
-            dem = dem * mnrat
-            edem = edem * mnrat
-            dn_reg = (rmatrix.T @ dem).squeeze()
-            chisq = _np.sum(((dnin - dn_reg) / ednin) ** 2) / nf
-
-        return dem, edem, elogt, chisq, dn_reg
-
-    # fallback empty results
-    return _np.zeros(nt), _np.zeros(nt), _np.zeros(nt), 0.0, _np.zeros(nf)
+    raise RuntimeError(
+        "dem_pix is not supported in multiGPU mode as a standalone function. "
+        "Use demmap_pos (batched GPU path) or run the single-GPU/single-node "
+        "baseline implementation."
+    )
 
 
 def demmap_pos(dd, ed, rmatrix, logt, dlogt, glc,
@@ -477,7 +248,7 @@ def demmap_pos(dd, ed, rmatrix, logt, dlogt, glc,
                     beta_b = 1.0 / cp.sqrt(1.0 + s_b ** 2)
                     alpha_b = s_b * beta_b
 
-                    # We'll compute per-pixel W and lambda on host (small matrices)
+                    # Compute per-pixel W and lambda on host (small matrices)
                     alpha_cpu = cp.asnumpy(alpha_b)
                     beta_cpu = cp.asnumpy(beta_b)
                     u_cpu = cp.asnumpy(u_b)
@@ -495,29 +266,53 @@ def demmap_pos(dd, ed, rmatrix, logt, dlogt, glc,
                         try:
                             SB_inv = np.linalg.pinv(SB)
                         except Exception:
-                            SB_inv = np.linalg.pinv(SB + 1e-12 * np.eye(SB.shape[0]))
+                            SB_inv = np.linalg.pinv(
+                                SB + 1e-12 * np.eye(SB.shape[0])
+                            )
 
                         # compute W on host then move to device
                         W_host = np.linalg.pinv(SB_inv @ vh_j.T @ B_host)
                         W_d = cp.asarray(W_host)
 
                         # pick lambda via dem_reg_map on host
-                        lamb = dem_reg_map(sva, svb, U_cpu, W_host, cp.asnumpy(dn_b[j]), cp.asnumpy(ed_b[j]), reg_tweak, nmu)
+                        # Provide U in shape (M, nf_dev) i.e. u.T[:, :nf]
+                        U_for_reg = (
+                            U_cpu.T[:, :nf_dev]
+                            if U_cpu.ndim == 2
+                            else U_cpu
+                        )
+                        lamb = dem_reg_map(
+                            sva,
+                            svb,
+                            U_for_reg,
+                            W_host,
+                            cp.asnumpy(dn_b[j]),
+                            cp.asnumpy(ed_b[j]),
+                            reg_tweak,
+                            nmu,
+                        )
 
                         # compute filter and kdag on device
                         alpha_d = cp.asarray(sva)
                         beta_d = cp.asarray(svb)
                         filt = cp.zeros((nf_dev, nt_dev), dtype=cp.float64)
                         for kk in range(nf_dev):
-                            filt[kk, kk] = (alpha_d[kk] / (alpha_d[kk] ** 2 + beta_d[kk] ** 2 * lamb))
+                            filt[kk, kk] = (
+                                alpha_d[kk]
+                                / (alpha_d[kk] ** 2 + beta_d[kk] ** 2 * lamb)
+                            )
 
                         u_d = u_b[j]
                         kdag_d = W_d @ (filt.T @ u_d[:nf_dev, :nf_dev])
                         dem_out_d = (kdag_d @ dn_b[j, :]).squeeze()
 
                         dem[b0 + j, :] = cp.asnumpy(dem_out_d)
-                        dn_reg[b0 + j, :] = cp.asnumpy((rmatrix_d.T @ dem_out_d).squeeze())
-                        residuals = (cp.asnumpy(dd[b0 + j, :]) - dn_reg[b0 + j, :]) / cp.asnumpy(ed[b0 + j, :])
+                        dn_reg[b0 + j, :] = cp.asnumpy(
+                            (rmatrix_d.T @ dem_out_d).squeeze()
+                        )
+                        residuals = (
+                            cp.asnumpy(dd[b0 + j, :]) - dn_reg[b0 + j, :]
+                        ) / cp.asnumpy(ed[b0 + j, :])
                         chisq[b0 + j] = np.sum(residuals ** 2) / dd.shape[1]
                         edem[b0 + j, :] = np.abs(dem[b0 + j, :]) * 0.1
 
@@ -526,18 +321,28 @@ def demmap_pos(dd, ed, rmatrix, logt, dlogt, glc,
                     batch_size = initial_batch
                 except Exception as e:
                     # Log and reduce batch size on memory/allocation failures
-                    logging.getLogger(__name__).exception("GPU block %d:%d failed: %s", b0, b1, e)
+                    _log = logging.getLogger(__name__)
+                    _log.exception("GPU block %d:%d failed: %s", b0, b1, e)
                     if cur_batch <= 1:
-                        logging.getLogger(__name__).exception("Minimum batch size reached; aborting GPU path")
+                        _log.exception(
+                            "Minimum batch size reached; aborting GPU path"
+                        )
                         raise
                     # reduce batch and retry the same start index
                     batch_size = max(1, cur_batch // 2)
-                    logging.getLogger(__name__).warning("Reducing GPU batch size to %d and retrying", batch_size)
+                    _log.warning(
+                        "Reducing GPU batch size to %d and retrying",
+                        batch_size,
+                    )
 
             return dem, edem, elogt, chisq, dn_reg
         except Exception as e:
-            # If anything fails on the GPU path, log full traceback and fall back to CPU
-            logging.getLogger(__name__).exception("GPU path failed, falling back to CPU: %s", e)
+            # If anything fails on the GPU path, raise an error so callers
+            # cannot silently fallback to CPU in multiGPU mode.
+            logging.getLogger(__name__).exception("GPU path failed: %s", e)
+            raise RuntimeError(
+                "GPU path failed; aborting multiGPU execution"
+            ) from e
 
     for i in range(na):
         dem_i, edem_i, elogt_i, chisq_i, dn_reg_i = dem_pix(

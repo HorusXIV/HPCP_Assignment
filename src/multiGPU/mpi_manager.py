@@ -13,10 +13,26 @@ try:
 except Exception:
     MPI = None
 
+# Try to import cupy at module import time so helper functions can
+# reference `cp` without causing a NameError. If CuPy is not
+# available `cp` will be None and callers can call `_require_cupy()`
+# to raise a helpful ImportError.
 try:
-    import cupy as cp
+    import cupy as cp  # type: ignore
 except Exception:
     cp = None
+
+
+def _require_cupy() -> None:
+    """Raise ImportError with guidance if CuPy cannot be imported."""
+    try:
+        import cupy  # noqa: F401
+    except Exception as e:
+        # Keep this message short to satisfy line-length checks
+        raise ImportError(
+            "CuPy is required for multiGPU execution but could not be "
+            f"imported. Original error: {e}"
+        )
 
 
 def init_mpi():
@@ -126,7 +142,10 @@ def gatherv_array(comm, local_array, counts, root=0):
     itemsize = int(_np.dtype(local_array.dtype).itemsize)
 
     sendcounts_bytes = [int(c * cols * itemsize) for c in counts]
-    displs_bytes = [int(sum(sendcounts_bytes[:i])) for i in range(len(sendcounts_bytes))]
+    # compute byte displacements for each rank
+    displs_bytes = []
+    for i in range(len(sendcounts_bytes)):
+        displs_bytes.append(int(sum(sendcounts_bytes[:i])))
 
     if rank == root:
         total_rows = int(sum(counts))
@@ -201,7 +220,8 @@ def set_device_for_local_rank(comm, prefer_visible=True):
                 cp.cuda.Device(0).use()
                 _ = cp.zeros((1,), dtype=cp.float32)
             except Exception as e:
-                logging.getLogger(__name__).warning("GPU bind/runtime test failed: %s", e)
+                _log = logging.getLogger(__name__)
+                _log.warning("GPU bind/runtime test failed: %s", e)
                 return -1
     except Exception:
         return -1
