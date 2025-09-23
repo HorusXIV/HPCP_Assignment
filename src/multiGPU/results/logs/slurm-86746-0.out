@@ -1,0 +1,40 @@
+[SLURM] Job 86746 on server0099
+[SLURM] Repo dir: /mnt/nas05/clusterdata01/home2/lukas.breiter/HPCP_Assignment
+[SLURM] Image:    /mnt/nas05/clusterdata01/home2/lukas.breiter/HPCP_Assignment/containers/python_poetry.sif
+[SLURM] Entry:    src.multiGPU.main
+[SLURM] Log dir:  /mnt/nas05/clusterdata01/home2/lukas.breiter/HPCP_Assignment/src/multiGPU/results/logs
+[SLURM] SLURM summary: JOB_ID=86746 NNODES=1 NTASKS=<unset> NTASKS_PER_NODE=<unset> NODELIST=server0099
+[SLURM] CUDA_VISIBLE_DEVICES=0,1
+[SLURM] nvidia-smi summary:
+index, name, memory.total [MiB], driver_version
+0, NVIDIA GeForce RTX 3080, 10240 MiB, 575.57.08
+1, NVIDIA GeForce RTX 3080, 10240 MiB, 575.57.08
+[SLURM] Computed NTASKS=2 (GPUS_PER_NODE=2)
+[SLURM] Preparing Poetry environment into /workspace/.venv
+Installing dependencies from lock file
+
+No dependencies to install or update
+
+Installing the current project: hpcp-assignment (0.1.0)
+Processing 10 input files across 2 ranks
+dn2d.shape=(1000, 6), edn2d.shape=(1000, 6)
+Computed total DEMs: 1000
+dn2d.shape=(1000, 6), edn2d.shape=(1000, 6)
+Computed total DEMs: 1000
+dn2d.shape=(1000, 6), edn2d.shape=(1000, 6)
+Computed total DEMs: 1000
+dn2d.shape=(1000, 6), edn2d.shape=(1000, 6)
+Computed total DEMs: 1000
+dn2d.shape=(1000, 6), edn2d.shape=(1000, 6)
+Computed total DEMs: 1000
+dn2d.shape=(1000, 6), edn2d.shape=(1000, 6)
+Computed total DEMs: 1000
+dn2d.shape=(1000, 6), edn2d.shape=(1000, 6)
+Computed total DEMs: 1000
+dn2d.shape=(1000, 6), edn2d.shape=(1000, 6)
+Computed total DEMs: 1000
+dn2d.shape=(1000, 6), edn2d.shape=(1000, 6)
+Computed total DEMs: 1000
+dn2d.shape=(1000, 6), edn2d.shape=(1000, 6)
+Computed total DEMs: 1000
+[SLURM] job exit code: 0

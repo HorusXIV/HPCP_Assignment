@@ -1,24 +1,42 @@
+# src/common/__init__.py
 """
-Common utilities shared across CPU/GPU/dask variants.
-
-Typical imports:
-    from src.common import load_np_stack, prepare_synthetic_responses
-    from src.common import dn2dem, dem_to_temp_maps
-    from src.common import run_baseline_suite
+Common package initializer. Keep minimal to avoid import cycles.
+Expose only stable, shared entry points.
 """
 
-from .io import load_np_stack, default_files, frame_for_solver
-from .responses import prepare_synthetic_responses
-from .dem_api import dn2dem
-from .post import dem_to_temp_maps
-from .profiling import run_baseline_suite
-
-__all__ = (
-    "load_np_stack",
-    "default_files",
-    "frame_for_solver",
-    "prepare_synthetic_responses",
-    "dn2dem",
-    "dem_to_temp_maps",
-    "run_baseline_suite",
+# Canonical data I/O (tiny, stable re-exports)
+from .dataio import (
+    default_files,
+    build_lazy_npz_stack,
+    load_np_stack,
+    frame_for_solver,
+    write_manifest_and_hash,
 )
+
+# Canonical profiling surface
+from .profiling import (
+    Profiler,
+    SystemSampler,
+    NVMLSampler,
+    write_bench_row,
+    write_run_card_md,
+    write_json,
+    aggregate_task_stream,
+)
+
+__all__ = [
+    # dataio
+    "default_files",
+    "build_lazy_npz_stack",
+    "load_np_stack",
+    "frame_for_solver",
+    "write_manifest_and_hash",
+    # profiling
+    "Profiler",
+    "SystemSampler",
+    "NVMLSampler",
+    "write_bench_row",
+    "write_run_card_md",
+    "write_json",
+    "aggregate_task_stream",
+]

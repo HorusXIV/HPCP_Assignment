@@ -5,6 +5,7 @@ Vendorized reference solver (provided code). Do not modify solver logic.
 This __init__ adds this directory to sys.path so the vendor modules can
 import each other using their original absolute names (e.g., 'demmap_pos').
 """
+
 from pathlib import Path
 import sys as _sys
 

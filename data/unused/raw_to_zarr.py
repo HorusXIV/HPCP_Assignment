@@ -15,13 +15,13 @@ Build a Zarr v2 array from raw SDO/AIA FITS.
 Deps: sunpy, astropy, numpy, zarr<3, numcodecs, tqdm
 """
 
-import os
 import sys
 import csv
 import json
 import warnings
 from pathlib import Path
 from datetime import timezone, datetime
+import yaml
 
 import numpy as np
 from astropy.io.fits.verify import VerifyWarning
@@ -31,7 +31,6 @@ from tqdm import tqdm
 warnings.simplefilter("ignore", VerifyWarning)
 
 # ---------------- CONFIG ----------------
-import yaml
 
 with open("config.yaml") as f:
     cfg = yaml.safe_load(f)
@@ -169,7 +168,6 @@ def frame_key(date_str, tstr) -> str:
 
 def append_frame_to_zarr(date_str, tstr, filemap):
     """Load the 6 raw maps as float32 stack and append as one time step to Zarr."""
-    import zarr
     root, ds = zarr_open_or_create()
 
     done = set(json.loads(root.attrs["done"]))
@@ -207,7 +205,7 @@ def main():
 
     groups = choose_groups()
     if not groups:
-        print(f"[INFO] No raw FITS found.")
+        print("[INFO] No raw FITS found.")
         return
 
     # keep only complete sets
