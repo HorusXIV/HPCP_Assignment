@@ -1,4 +1,4 @@
-multiGPU module — concise guide
+multiGPU module
 ==============================
 
 Purpose
@@ -61,10 +61,10 @@ Use the provided launcher `hpc/slurm_run_multiGPU.sh`. Key points:
 - Use `srun --mpi=pmix` so SLURM propagates `CUDA_VISIBLE_DEVICES`
 - For containers, use `singularity exec --nv` (or equivalent) to expose GPUs
 
-Example submit (adapt REPO_DIR and IMAGE):
+Example submit:
 
 ```pwsh
-sbatch --export=REPO_DIR=/path/to/repo,IMAGE=/path/to/image.sif hpc/slurm_run_multiGPU.sh
+sbatch hpc/slurm_run_multiGPU.sh
 ```
 
 Minimal troubleshooting checklist
@@ -140,34 +140,6 @@ Layout (what's actually in the package)
 - `src/multiGPU/checkpoint.py` — checkpoint manager for atomic saves.
 - `src/multiGPU/preempt.py` — preemption handlers for graceful checkpointing.
 
-Quick start (developer laptop)
-------------------------------
-1. Create and activate the Poetry environment from repo root:
-
-```pwsh
-poetry install
-poetry shell
-```
-
-2a. If you have GPUs and CuPy installed, run a serial smoke test (no MPI):
-
-```pwsh
-poetry run python -m src.multiGPU.main --input data/np32/20170906_12_00_12.npz \
-  --max-samples 200
-```
-
-2b. On a Raspberry Pi or any CPU-only system (no CuPy), you have two
-options:
-
-- Use the test shim approach in unit tests: tests may inject a small
-  `cupy` shim (NumPy-backed) into `sys.modules` before importing
-  `src.multiGPU` modules. This permits importing `gpu_kernels` for unit
-  testing without installing CuPy or requiring GPUs. See
-  `tests/test_multiGPU_shim.py` for an example shim and usage.
-- Refactor `src/multiGPU/gpu_kernels.py` to lazily import CuPy within
-  GPU-specific functions; this makes the module importable on CPU-only
-  systems without shims. (Recommended for long-term maintainability.)
-
 Notes about input files
 ----------------------
 - Preferred: `dn` of shape `(n_pixels, n_filters)` and `edn` of shape
@@ -175,13 +147,10 @@ Notes about input files
 - Supported: `bands` layout `(n_filters, ny, nx)` — the script will flatten
   to `(n_pixels, n_filters)` and may sample down with `--max-samples`.
 
-CLI highlights
+CLI Arguments
 --------------
-- `--input <path>`: path to the `.npz` input file.
+- `--input-dir <path>`: path to the input folder.
 - `--max-samples N`: limit number of pixels sampled for rapid development.
-- `--block-size B`: number of pixels processed per GPU batch (tune by GPU memory).
-- `--save-dir DIR`: optional directory where each rank can write outputs or
-  checkpoints (useful for resuming and debugging).
 
 Outputs and persistence
 -----------------------
@@ -201,84 +170,14 @@ Use `CheckpointManager` and `register_preempt_handlers` to handle
 preemption and to perform atomic checkpoint saves. See `src/multiGPU/checkpoint.py`
 and `src/multiGPU/preempt.py` for examples.
 
-SLURM example
--------------
-See `hpc/slurm_run_multiGPU.sh` for a working example launcher. Key items:
-
-- Request GPUs per node with `#SBATCH --gres=gpu:<N>`.
-- For one rank per GPU set `--ntasks-per-node` equal to GPUs per node and
-  launch with `srun -n <total_ranks> ...`.
-- Use `srun --mpi=pmix` to have SLURM propagate environment variables like
-  `CUDA_VISIBLE_DEVICES` correctly.
 
 Batched GPU/SVD tuning notes
 ---------------------------
 - `demmap_pos` contains a batched CUDA/SVD path that tries to amortize
-  SVD costs using CuPy's batched operations. Tune `--block-size` to fit
+  SVD costs using CuPy's batched operations. Tune `block` to fit
   GPU memory. As a rough heuristic: batch_mem ≈ batch_size * nt * nf * 8
   bytes * safety_factor (0.6).
 - The GPU path attempts retries with smaller batches in case of
   allocation/memory failures; however, when the GPU path ultimately fails
   the module raises `RuntimeError` to avoid silent fallbacks in
   multi-GPU production runs.
-
-Testing (how to run on CPU-only hardware)
-----------------------------------------
-- Unit tests that need to import `gpu_kernels.py` without CuPy can use a
-  simple NumPy-backed shim inserted into `sys.modules['cupy']` before
-  importing. Example test added: `tests/test_multiGPU_shim.py` (this
-  injects a minimal shim and exercises `dem_reg_map`, `safe_svd` error
-  handling, and `mpi_manager` GPU-mapping). The shim is deliberately
-  minimal and only implements the small CuPy API surface the package
-  uses.
-- Run the shim-based tests on a Raspberry Pi / CPU-only runner without
-  installing CuPy:
-
-```pwsh
-poetry install
-poetry run pytest -q tests/test_multiGPU_shim.py
-```
-
-- For CI: run CPU-only tests by default on each PR. If you have a GPU
-  runner available, provide an optional job that installs the appropriate
-  CuPy wheel and runs the full GPU tests.
-
-Developer notes & recommended refactor
--------------------------------------
-- Current behavior: the package intentionally imports `cupy` at module
-  import time and will raise if CuPy is not installed. This is a
-  defensive choice to prevent accidental silent CPU fallbacks in
-  production multi-GPU workflows, but it makes testing and local
-  imports harder on CPU-only machines.
-- Recommendation: lazily import CuPy inside functions that require it
-  (or centralize a runtime-check helper). This small refactor improves
-  testability (removes the need for a shim) while preserving the
-  ability to raise loudly when running in GPU-only production mode.
-
-Troubleshooting (updated)
--------------------------
-- If `cupy` is not installed you will see ImportError when importing
-  `src.multiGPU.gpu_kernels` or `src.multiGPU.mpi_manager` — on CPU-only
-  development machines prefer using the test shim or apply the lazy
-  import refactor described above.
-- If the GPU path fails at runtime inside `demmap_pos`, the function
-  will log and raise `RuntimeError` rather than silently falling back to
-  CPU in multi-GPU mode. This is intentional for correctness on
-  multi-node runs.
-
-Further work and suggestions
----------------------------
-- Move `dem_reg_map` fully onto GPU (experimental) to reduce host-device
-  round-trips; requires numeric verification.
-- Add a `--save-output` flag in `main.py` to atomically persist per-rank
-  outputs, and a separate aggregation utility to merge results.
-- Add CI workflows: CPU-only tests on every PR; optional GPU job on a
-  GPU-enabled runner that installs a matching CuPy wheel and runs GPU
-  path tests.
-
-If you'd like, I can:
-- create `TESTING_PI.md` with concrete Pi/CI instructions,
-- refactor `gpu_kernels.py` to lazy-import CuPy and update tests to drop
-  the shim, or
-- add more unit tests for `demmap_pos` CPU fallback and `scatterv_array`/
-  `gatherv_array` using a fake `comm` object.
