@@ -42,6 +42,15 @@ ipywidgets = "^8.1.7"
 matplotlib = "^3.10.6"
 mpl-animators = ">=1.2.0"
 
+[tool.poetry.group.profiling]
+optional = true
+
+[tool.poetry.group.profiling.dependencies]
+# NVTX python bindings (optional). Install with:
+#   poetry install --with profiling
+# Only imported when MULTIGPU_NVTX=1
+nvtx = "^0.2.10"
+
 [tool.poetry.group.data.dependencies]
 pandas = "^2.3.2"
 xarray = "^2025.9.0"

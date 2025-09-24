@@ -10,6 +10,7 @@ This project combines a real scientific computing application with HPC technique
 * [Linting & tests](#linting--tests)
 * [Continuous Integration (GitHub Actions)](#continuous-integration-github-actions)
 * [HPC: Singularity + Slurm](#hpc-singularity--slurm)
+* [NVTX Profiling](#nvtx-profiling)
 
   * [Build the Singularity image](#build-the-singularity-image)
   * [Run on Slurm](#run-on-slurm)
@@ -189,6 +190,21 @@ Request ≥2 GPUs (e.g., `--gres=gpu:2`) and ensure your code initializes NCCL /
 
 * **Poetry can’t find the package**
   Check `packages = [{ include = "...", from = "src" }]` in `pyproject.toml` and that your packages live under `src/`.
+
+---
+
+## NVTX Profiling
+
+Optional NVTX instrumentation is available for the multi-GPU path. Enable it to obtain rich timeline annotations in **Nsight Systems** / **Nsight Compute**:
+
+```bash
+poetry install --with profiling        # install optional nvtx dep
+export MULTIGPU_NVTX=1                 # turn on ranges
+nsys profile -t cuda,nvtx,osrt -o run \
+  poetry run python -m src.multiGPU.main --input-dir data/np32 --max-samples 512
+```
+
+See `docs/NVTX_PROFILING.md` for detailed guidance (phase list, Slurm usage, disabling, overhead notes).
 
 ---
 
