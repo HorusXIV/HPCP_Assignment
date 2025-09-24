@@ -271,22 +271,48 @@ def main():
                         )
                     )
 
-                # Process local pixels in blocks to amortize GPU setup costs
-                # Use environment block size to match kernel batching
+                # Aggressive block sizing for large datasets - optimize GPU utilization
+                # Use intelligent adaptive sizing to minimize batches
                 env_block = int(os.environ.get("MULTIGPU_BATCH_SIZE", "0"))
-                if env_block > 0:
-                    block = min(env_block, local_dn.shape[0])
-                else:
-                    # Adaptive block size based on data size
-                    if local_dn.shape[0] <= 256:
-                        block = local_dn.shape[0]  # Process all at once
-                    elif local_dn.shape[0] <= 2048:
-                        block = min(512, local_dn.shape[0])  # Medium chunks
-                    else:
-                        block = 1024  # Large chunks for big datasets
                 
-                log.info(f"Rank {rank}: Processing {local_dn.shape[0]} pixels "
-                         f"in block size {block}")
+                # Calculate optimal block size based on available GPU memory and data size
+                if local_dn.shape[0] <= 1024:
+                    block = local_dn.shape[0]  # Single batch for small data
+                elif local_dn.shape[0] <= 16384:  # 16K pixels
+                    block = max(2048, local_dn.shape[0] // 4)  # ~4 batches max
+                elif local_dn.shape[0] <= 1048576:  # 1M pixels  
+                    block = max(8192, local_dn.shape[0] // 8)  # ~8 batches max
+                else:  # Large datasets (>1M pixels)
+                    block = max(32768, local_dn.shape[0] // 16)  # ~16 batches max
+                
+                # Apply environment override only if it makes sense
+                if env_block > 0:
+                    # Only use env override if it's larger than our minimum efficient size
+                    min_efficient = max(2048, local_dn.shape[0] // 32)
+                    if env_block >= min_efficient:
+                        block = min(env_block, local_dn.shape[0])
+                    else:
+                        log.warning(f"Rank {rank}: MULTIGPU_BATCH_SIZE={env_block} too small "
+                                  f"for {local_dn.shape[0]} pixels, using {block}")
+                
+                # Ensure we don't exceed data size
+                block = min(block, local_dn.shape[0])
+                
+                estimated_batches = (local_dn.shape[0] + block - 1) // block
+                log.info(f"Rank {rank}: Processing {local_dn.shape[0]:,} pixels "
+                         f"in {estimated_batches} batches of size {block:,}")
+                
+                # Only log memory info for the first rank to avoid spam
+                if rank == 0:
+                    try:
+                        import cupy as cp
+                        free_mem, total_mem = cp.cuda.runtime.memGetInfo()
+                        log.info(f"GPU memory before processing: "
+                               f"{(total_mem-free_mem)/1024**3:.1f}/"
+                               f"{total_mem/1024**3:.1f}GB "
+                               f"({100*(total_mem-free_mem)/total_mem:.1f}% used)")
+                    except Exception:
+                        pass
                 
                 dem_local = np.zeros((local_dn.shape[0], nt))
                 edem_local = np.zeros_like(dem_local)

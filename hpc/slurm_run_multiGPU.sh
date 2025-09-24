@@ -29,11 +29,11 @@ NSYS_OPTS="${NSYS_OPTS:-cuda,nvtx,osrt}"
 MULTIGPU_NVTX="${MULTIGPU_NVTX:-0}" # NVTX phase annotation toggle (Python + CuPy). Minimal overhead when off.
 
 # Performance tuning environment variables for high-resolution image processing
-export MULTIGPU_BATCH_SIZE="${MULTIGPU_BATCH_SIZE:-512}"  # 0=auto, >0=override
+export MULTIGPU_BATCH_SIZE="${MULTIGPU_BATCH_SIZE:-0}"  # 0=adaptive, >0=override (was causing tiny batches!)
 export MULTIGPU_STABLE_PINV="${MULTIGPU_STABLE_PINV:-1}"  # 1=enable for large images
 export MULTIGPU_KEEP_DEVICE="${MULTIGPU_KEEP_DEVICE:-1}"  # Keep arrays on device
 export MULTIGPU_VECTOR_DISABLE="${MULTIGPU_VECTOR_DISABLE:-0}"  # Fallback to scalar path
-export MULTIGPU_QUIET="${MULTIGPU_QUIET:-0}"  # 1=disable verbose batch logging
+export MULTIGPU_QUIET="${MULTIGPU_QUIET:-1}"  # 1=quiet by default for large datasets
 
 # MPI / comm environment optimized for high-resolution image processing
 export UCX_TLS=${UCX_TLS:-sm,self,cuda_copy,cuda_ipc,rc}  # reordered for intra-node first

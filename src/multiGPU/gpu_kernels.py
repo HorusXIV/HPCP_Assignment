@@ -299,20 +299,36 @@ def demmap_pos(
                 cur_batch = min(batch_size, na - b0)
                 b1 = b0 + cur_batch
                 
-                # Performance logging (selective for large images)
+                # Extremely selective logging for large datasets
                 log = logging.getLogger(__name__)
-                # Check if verbose logging is disabled
                 verbose_disabled = os.environ.get("MULTIGPU_QUIET", "0") == "1"
+                
                 if verbose_disabled:
                     should_log = False
                 else:
-                    # Log: first batch, every 100 batches, or milestones
                     batch_num = b0 // batch_size + 1
-                    milestone_batches = [1, 10, 50, 100, 500, 1000]
-                    should_log = (b0 == 0 or
-                                  batch_num % 100 == 0 or
-                                  batch_num in milestone_batches or
-                                  na > 10000000)  # Large images
+                    total_batches = (na + batch_size - 1) // batch_size
+                    
+                    # For large datasets (>1000 batches), be very selective
+                    if total_batches > 1000:
+                        # Log at key progress points only
+                        milestones = [
+                            1,  # Start
+                            max(1, total_batches // 100),      # 1%
+                            max(1, total_batches // 10),       # 10%
+                            max(1, total_batches // 4),        # 25%
+                            max(1, total_batches // 2),        # 50%
+                            max(1, (3 * total_batches) // 4),  # 75%
+                            max(1, (9 * total_batches) // 10),  # 90%
+                            total_batches                       # End
+                        ]
+                        should_log = batch_num in milestones
+                    else:
+                        # Smaller datasets use old approach
+                        milestones = [1, 10, 50, 100, 500]
+                        should_log = (b0 == 0 or 
+                                    batch_num % 100 == 0 or 
+                                    batch_num in milestones)
                 
                 if should_log:
                     try:
