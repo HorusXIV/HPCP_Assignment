@@ -51,10 +51,11 @@ def init_mpi():
 
 
 def get_local_rank_info(comm):
-    """Return (local_rank, local_size, node_name) for the calling process.
+    """Return (local_rank, local_size, node_name) using shared-memory split.
 
-    Uses `MPI.Get_processor_name()` to group ranks by node. If MPI not
-    available returns (0,1,hostname).
+    Uses `COMM_TYPE_SHARED` to create a node-local communicator and obtain
+    precise `local_rank`/`local_size`. Falls back to hostname grouping if
+    mpi4py lacks `Split_type`. If MPI not available returns (0,1,hostname).
     """
     import socket
 
@@ -62,12 +63,25 @@ def get_local_rank_info(comm):
         return 0, 1, socket.gethostname()
 
     node = MPI.Get_processor_name()
-    all_nodes = comm.allgather(node)
-    local_indices = [i for i, n in enumerate(all_nodes) if n == node]
-    local_size = len(local_indices)
-    rank = comm.Get_rank()
-    local_rank = local_indices.index(rank)
-    return local_rank, local_size, node
+
+    # Prefer Split_type for robust locality detection
+    try:
+        local_comm = comm.Split_type(MPI.COMM_TYPE_SHARED, 0)
+        local_rank = local_comm.Get_rank()
+        local_size = local_comm.Get_size()
+        try:
+            local_comm.Free()
+        except Exception:
+            pass
+        return local_rank, local_size, node
+    except Exception:
+        # Fallback: hostname-based grouping
+        all_nodes = comm.allgather(node)
+        local_indices = [i for i, n in enumerate(all_nodes) if n == node]
+        local_size = len(local_indices)
+        rank = comm.Get_rank()
+        local_rank = local_indices.index(rank)
+        return local_rank, local_size, node
 
 
 def scatterv_array(comm, array, counts, dtype=None):

@@ -1,19 +1,19 @@
 """Rank-aware logging utilities for multiGPU package.
 
-Provides a Queue-based logging setup so multiple processes (MPI ranks)
-can safely emit log records without colliding. Creates per-rank log files
-and an optional root aggregated log. Use `setup_logging` from processes
-and call `shutdown_logging` on exit.
+Lightweight per-rank file logging (no multiprocessing queues).
+This avoids shutdown hangs on some platforms (notably Windows) that can
+occur when `multiprocessing.Queue` feeder threads aren't joined.
+Use `setup_logging` from each MPI rank and call `shutdown_logging` on exit.
 """
 from __future__ import annotations
 
 import logging
 import logging.handlers
-import multiprocessing
 import os
+import sys
 from typing import Optional
 
-_listener: Optional[logging.handlers.QueueListener] = None
+_listener: Optional[logging.handlers.QueueListener] = None  # API compat
 
 
 class RankFilter(logging.Filter):
@@ -25,6 +25,22 @@ class RankFilter(logging.Filter):
         # attach rank to record for formatting
         record.rank = getattr(record, "rank", self.rank)
         return True
+
+
+class ConsoleFilter(logging.Filter):
+    """Allow only warnings/errors or records explicitly marked as general.
+
+    This keeps rank-specific chatter out of the console (general) log while
+    still showing important warnings/errors. To mark a record as general,
+    log with extra={"general": True}.
+    """
+
+    def filter(
+        self, record: logging.LogRecord
+    ) -> bool:  # type: ignore[override]
+        if record.levelno >= logging.WARNING:
+            return True
+        return bool(getattr(record, "general", False))
 
 
 def _make_formatter():
@@ -51,53 +67,70 @@ def _make_formatter():
 def setup_logging(
     results_dir: str, rank: int = 0, size: int = 1, console: bool = True
 ):
-    """Initialize a process-safe queue logger for this process.
+    """Initialize logging for this MPI rank (per-rank file, optional console).
 
     - `results_dir`: directory to place `logs/` into (will be created)
     - `rank`: MPI rank integer
-    - `size`: total MPI size (used to create aggregated log on rank 0)
-    - `console`: whether to also emit to stderr (guarded per-rank)
+    - `size`: total MPI size (unused; retained for API stability)
+    - `console`: whether to also emit to stderr (rank 0 only)
 
-    Returns: logger for convenience (root logger configured)
+    Returns: configured root logger
     """
-    global _listener
-
     os.makedirs(results_dir, exist_ok=True)
-    log_queue = multiprocessing.Queue(-1)
-
-    # Configure per-process root logger to send to queue
-    qh = logging.handlers.QueueHandler(log_queue)
     root = logging.getLogger()
-    # Remove existing handlers to avoid duplicate logs in interactive use
+
+    # Remove existing handlers to avoid duplicates in interactive sessions
     for h in list(root.handlers):
-        root.removeHandler(h)
+        try:
+            root.removeHandler(h)
+        except Exception:
+            pass
 
-    root.setLevel(logging.INFO)
-    # Ensure every record has a `rank` attribute. This prevents KeyError
-    # when formatters expect the `rank` field.
+    # Configure root log level (env override). Default to WARNING to keep
+    # quiet.
+    _lvl_name = os.environ.get("MULTIGPU_LOG_LEVEL", "WARNING").upper()
+    _lvl = getattr(logging, _lvl_name, logging.WARNING)
+    root.setLevel(_lvl)
     root.addFilter(RankFilter(rank))
-    root.addHandler(qh)
 
-    # Also add a per-rank file to capture this worker's logs locally
-    per_rank_log = os.path.join(results_dir, "logs", f"rank{rank:03d}.log")
-    os.makedirs(os.path.dirname(per_rank_log), exist_ok=True)
-    fh_rank = logging.FileHandler(per_rank_log, mode="a")
-    fh_rank.setFormatter(_make_formatter())
-    # To ensure rank shows up in records, add a filter
-    fh_rank.addFilter(RankFilter(rank))
-    # Add the file handler as an additional handler that writes directly.
-    # This bypasses the queue to help ensure process-local logs are written
-    # even if the queue listener stops unexpectedly.
-    root.addHandler(fh_rank)
+    # Per-rank file handler (disabled in quiet mode unless forced)
+    quiet_mode = (
+        _lvl >= logging.WARNING
+        and os.environ.get("MULTIGPU_QUIET", "1") == "1"
+    )
+    want_rank_files = os.environ.get("MULTIGPU_RANK_FILES", "0") == "1"
+    if (not quiet_mode) or want_rank_files:
+        per_rank_log = os.path.join(
+            results_dir, "logs", f"rank{rank:03d}.log"
+        )
+        os.makedirs(os.path.dirname(per_rank_log), exist_ok=True)
+        fh_rank = logging.FileHandler(per_rank_log, mode="a")
+        fh_rank.setLevel(_lvl)
+        fh_rank.setFormatter(_make_formatter())
+        fh_rank.addFilter(RankFilter(rank))
+        root.addHandler(fh_rank)
+
+    # Optional console for rank 0 only (keeps cluster logs tidy)
+    if console and rank == 0:
+        # Stream to stdout (not stderr) so Slurm writes these into .out,
+        # not .err
+        sh = logging.StreamHandler(stream=sys.stdout)
+        sh.setLevel(_lvl)
+        sh.setFormatter(_make_formatter())
+        sh.addFilter(RankFilter(rank))
+        sh.addFilter(ConsoleFilter())
+        root.addHandler(sh)
 
     return root
 
 
 def shutdown_logging():
-    """Shut down the queue listener (if started) and flush handlers."""
-    global _listener
+    """Flush and close all handlers.
+
+    Keeping this simple ensures fast, clean shutdown without hanging
+    on background threads.
+    """
     root = logging.getLogger()
-    # remove queue handler(s)
     for h in list(root.handlers):
         try:
             h.flush()
@@ -108,9 +141,3 @@ def shutdown_logging():
             root.removeHandler(h)
         except Exception:
             pass
-
-    if _listener is not None:
-        try:
-            _listener.stop()
-        finally:
-            _listener = None
