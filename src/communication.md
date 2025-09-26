@@ -97,18 +97,20 @@ What to capture
 
 Setup
 
-- Dask-CUDA (or Ray) to shard tiles across GPUs. UCX for NVLink/IB if available.
+- Explicit MPI (mpi4py) with 1 rank per GPU; ranks map to GPUs via `CUDA_VISIBLE_DEVICES` (see `src/multiGPU/mpi_manager.py`).
+- Slurm launch (e.g., `srun --ntasks-per-node=<#gpus> --gpus-per-task=1 --cpu-bind=cores --gpu-bind=closest --mpi=pmix`).
+- UCX/NCCL environment tuned for intra-node first; container runs use `singularity exec --nv`.
 
 Tools
 
-- Nsight Systems again, but launched on the driver script; captures multiple GPUs.
-- Dask dashboard (task placement per GPU, comms time).
-- Optional: DCGM or nvidia-smi dmon for per-GPU util/mem/power.
+- Nsight Systems on the job launcher (captures multi-rank, multi-GPU timeline); NVTX ranges enabled via `MULTIGPU_NVTX=1`.
+- Optional: `nvidia-smi dmon`/DCGM for per-GPU utilization/memory; MPI barriers to bracket timed regions.
 
 What to capture
 
-- Strong scaling over 1→N GPUs on a fixed global size.
-- Efficiency vs GPUs, comms/serialization overheads, load balance.
+- Strong scaling: fixed global size across 1→N GPUs; report DEMs/s, speedup, and efficiency (speedup / N).
+- Overheads: H2D/D2H transfer ratio, gather/scatter time, and any load imbalance across ranks.
+- Effect of batch size override vs adaptive batching on throughput/memory.
 
 ## Reference harness (uniform across variants)
 
