@@ -1,10 +1,20 @@
 """GPU-accelerated kernels for DEM computations using CuPy."""
 from __future__ import annotations
+"""GPU-accelerated kernels for DEM computations using CuPy."""
+from __future__ import annotations
 
 from typing import Tuple
 from collections import deque
 import logging
 import numpy as np
+import os
+
+try:  # CuPy required
+    import cupy as cp  # type: ignore
+except Exception as e:  # pragma: no cover
+    raise ImportError("CuPy is required for multiGPU execution: %s" % e) from e
+
+GPU_AVAILABLE = True
 import os
 
 try:  # CuPy required
@@ -89,8 +99,10 @@ def safe_svd(
         u, s, vh = cp.linalg.svd(A_gpu, full_matrices=full_matrices)
         return cp.asnumpy(u), cp.asnumpy(s), cp.asnumpy(vh)
     except Exception as exc:  # pragma: no cover
+    except Exception as exc:  # pragma: no cover
         logging.getLogger(__name__).exception("GPU SVD failed: %s", exc)
         raise RuntimeError(
+            "CuPy SVD failed; aborting multiGPU execution"
             "CuPy SVD failed; aborting multiGPU execution"
         ) from exc
 
@@ -100,6 +112,7 @@ def safe_pinv(A: np.ndarray, rcond: float = 1e-12) -> np.ndarray:
     if not np.isfinite(A).all():
         A = np.nan_to_num(A, nan=0.0, posinf=1e30, neginf=-1e30)
     A = np.clip(A, -1e12, 1e12, out=A)
+    u, s, vh = safe_svd(A, full_matrices=False)
     u, s, vh = safe_svd(A, full_matrices=False)
     tol = np.max(s) * rcond if s.size else rcond
     s_inv = np.array([1/x if x > tol else 0 for x in s])
@@ -140,10 +153,12 @@ def dem_reg_map(sigmaa, sigmab, U, W, data, err, reg_tweak, nmu=500):
     U_arr = xp.asarray(U)
     if U_arr.ndim != 2:
         raise ValueError("U must be 2D")
+        raise ValueError("U must be 2D")
     if U_arr.shape[1] != nf:
         if U_arr.shape[0] == U_arr.shape[1] and U_arr.shape[0] >= nf:
             U_arr = U_arr.T[:, :nf]
         else:
+            raise ValueError("Incompatible U shape for data length")
             raise ValueError("Incompatible U shape for data length")
     nmu_eff = max(int(nmu), 2)
     mu = np.geomspace(minx, maxx, num=nmu_eff, dtype=float)
@@ -156,6 +171,7 @@ def dem_reg_map(sigmaa, sigmab, U, W, data, err, reg_tweak, nmu=500):
         sa = xp.asarray(sigmaa[kk])
         num = mu_xp * (sb ** 2) * coef
         den = (sa ** 2) + mu_xp * (sb ** 2)
+        arg[kk, :] = (num / den) ** 2
         arg[kk, :] = (num / den) ** 2
     discr = xp.sum(arg[:, :nmu_eff], axis=0) - xp.sum(err ** 2) * reg_tweak
     discr_host = cp.asnumpy(discr) if GPU_AVAILABLE else np.asarray(discr)
@@ -340,9 +356,26 @@ def fused_svd_coeffs(s_b):
 def dem_pix(*_a, **_k):  # pragma: no cover
     raise RuntimeError(
         "dem_pix unsupported in multiGPU module; use demmap_pos"
+        "dem_pix unsupported in multiGPU module; use demmap_pos"
     )
 
 
+def demmap_pos(
+    dd,
+    ed,
+    rmatrix,
+    logt,
+    dlogt,
+    glc,
+    reg_tweak=1.0,
+    max_iter=10,
+    rgt_fact=1.5,
+    dem_norm0=None,
+    nmu=42,
+    warn=False,
+    l_emd=False,
+    rscl=False,
+):
 def demmap_pos(
     dd,
     ed,
@@ -371,6 +404,10 @@ def demmap_pos(
             dd_d = cp.asarray(dd, dtype=cp.float64)
             ed_d = cp.asarray(ed, dtype=cp.float64)
             rmatrix_d = cp.asarray(rmatrix, dtype=cp.float64)
+            dlogt_d = cp.asarray(dlogt, dtype=cp.float64)
+            L = cp.diag(1.0 / cp.sqrt(dlogt_d))
+            B_inv = cp.linalg.pinv(L)
+            nf_dev = rmatrix_d.shape[1]
             dlogt_d = cp.asarray(dlogt, dtype=cp.float64)
             L = cp.diag(1.0 / cp.sqrt(dlogt_d))
             B_inv = cp.linalg.pinv(L)
@@ -828,9 +865,12 @@ def demmap_pos(
                 except Exception as e:
                     log = logging.getLogger(__name__)
                     log.exception("GPU batch %d:%d failed: %s", b0, b1, e)
+                    log = logging.getLogger(__name__)
+                    log.exception("GPU batch %d:%d failed: %s", b0, b1, e)
                     if cur_batch <= 1:
                         raise
                     batch_size = max(1, cur_batch // 2)
+                    logging.warning(
                     logging.warning(
                         "Reducing GPU batch size to %d and retrying",
                         batch_size,
@@ -865,10 +905,13 @@ def demmap_pos(
                 
             return dem, edem, elogt, chisq, dn_reg
         except Exception as e:  # pragma: no cover
+        except Exception as e:  # pragma: no cover
             logging.getLogger(__name__).exception("GPU path failed: %s", e)
             raise RuntimeError(
                 "GPU path failed; aborting multiGPU execution"
             ) from e
+    for _i in range(na):  # pragma: no cover
+        raise RuntimeError("CPU fallback not supported in this module")
     for _i in range(na):  # pragma: no cover
         raise RuntimeError("CPU fallback not supported in this module")
     return dem, edem, elogt, chisq, dn_reg

@@ -1,5 +1,6 @@
 #!/bin/bash -l
 #SBATCH --job-name=HPCP_MultiGPU_OPT
+#SBATCH --job-name=HPCP_MultiGPU_OPT
 #SBATCH --partition=performance
 #SBATCH --time=24:00:00
 #SBATCH --nodes=1
@@ -13,6 +14,9 @@
 
 set -euo pipefail
 
+# -------------------------------
+# Tunables (override via sbatch --export VAR=...)
+# -------------------------------
 # -------------------------------
 # Tunables (override via sbatch --export VAR=...)
 # -------------------------------
@@ -109,6 +113,7 @@ fi
 export POETRY_VIRTUALENVS_PATH="/workspace/.venv"
 export POETRY_CACHE_DIR="/workspace/.cache/pypoetry"
 
+# Simple file lock to avoid redundant installation storms
 # Simple file lock to avoid redundant installation storms
 singularity exec --cleanenv --nv --bind "$REPO_DIR":/workspace "$IMAGE" \
     bash -lc 'cd /workspace
