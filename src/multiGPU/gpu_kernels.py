@@ -1,4 +1,22 @@
-"""GPU-accelerated kernels for DEM computations using CuPy."""
+"""GPU-accelerated kernels used by the multi-GPU DEM solver.
+
+This module provides the hot-path numerical routines implemented with CuPy
+and optional CUDA streams. It also contains small CPU fallbacks for sanity
+checks and unit tests, but production use requires a CUDA-capable GPU and
+CuPy.
+
+Terminology
+- DEM: Differential Emission Measure reconstruction per spatial sample.
+- Batch: A contiguous slice of samples processed together on a GPU.
+
+Environment flags
+- MULTIGPU_BATCH_SIZE: int, override the auto batch size (0 = auto).
+- MULTIGPU_NVTX: "1" to enable NVTX ranges inside kernels.
+- MULTIGPU_STREAMS: "1" to enable async D2H overlap via CUDA streams.
+- MULTIGPU_STREAMS_DEPTH: ring-buffer depth for pinned host staging.
+- MULTIGPU_NO_FUSE: "1" to disable cp.fuse() for debug/determinism.
+- MULTIGPU_VERBOSE: "1" to enable extra informational logging.
+"""
 
 from __future__ import annotations
 
@@ -17,9 +35,30 @@ _np = np
 
 
 def _adaptive_batch_size(
-    na: int, nf: int, nt: int, safety: float = 0.70, log_info: bool = True
+    na: int,
+    nf: int,
+    nt: int,
+    nmu: int,
+    safety: float = 0.70,
+    log_info: bool = True,
 ) -> int:
-    """Heuristic batch size using free GPU memory (env override allowed)."""
+    """Choose a batch size based on current free GPU memory.
+
+    The calculation includes dominant per-pixel tensor terms for SVD and
+    lambda selection to avoid oversizing batches on large images.
+
+    Args:
+        na: Total number of samples (pixels) to process.
+        nf: Number of bands/filters per sample.
+        nt: Number of temperature bins (response rows).
+        nmu: Count of candidate regularization strengths.
+        safety: Fraction of free memory to target (0 < safety <= 1).
+        log_info: Whether to log informational details once per process.
+
+    Returns:
+        An integer batch size in [1, na]. Environment variable
+        ``MULTIGPU_BATCH_SIZE`` overrides this heuristic when set > 0.
+    """
     # Check for environment override first - critical for large images
     env_bs = int(os.environ.get("MULTIGPU_BATCH_SIZE", "0"))
     if env_bs > 0:
@@ -34,15 +73,24 @@ def _adaptive_batch_size(
     default = min(64, na)  # Increased from 32 for better GPU utilization
     try:  # pragma: no cover
         free_b, total_b = cp.cuda.runtime.memGetInfo()  # type: ignore
-        m = max(nf, nt)
-        # More accurate memory estimate for large images; include
-        # workspace overhead conservatively.
-        bytes_per_pixel = 8 * (3 * nf + 3 * nt * nf + 3 * m * m + 64)
+        # Per-pixel memory estimate of dominant tensors present during
+        # SVD + lambda selection. Use k = min(nf, nt).
+        k = min(nf, nt)
+        # SVD-related: AB1 (nf*nt), U (nf*k), s (k), Vh (k*nt)
+        svd_terms = (nf * nt) + (nf * k) + k + (k * nt)
+        # Lambda-selection dominant 3D tensors: f and vals ~ 2 * (k * nmu)
+        # plus per-pixel vectors (arg/discr/mu) ~ O(nmu).
+        lambda_terms = (2 * k * max(nmu, 2)) + (2 * max(nmu, 2))
+        # Modest constant overhead per pixel
+        bytes_per_pixel = 8 * (svd_terms + lambda_terms + 64)
         if bytes_per_pixel <= 0:
             return default
 
-        # Use more aggressive memory utilization for large datasets
-        effective_safety = safety if na < 1000000 else min(safety + 0.1, 0.85)
+        # Adjust safety conservatively for large images or large nmu to
+        # accommodate allocator fragmentation and concurrent buffers.
+        effective_safety = safety
+        if na >= 1_000_000 or nmu >= 32:
+            effective_safety = max(safety - 0.10, 0.50)
         est = int((free_b * effective_safety) / bytes_per_pixel)
 
         if est <= 0:
@@ -57,13 +105,16 @@ def _adaptive_batch_size(
         if log_info and verbose:
             free_gb = free_b / 1024**3
             logging.getLogger(__name__).info(
-                "Adaptive batch size: %d (free_mem: %.1fGB, safety: %.2f, "
-                "est: %d, pixels: %d)",
+                "Adaptive batch size: %d (free_mem: %.1fGB, safety: %.2f, est: %d, pixels: %d, nf: %d, nt: %d, nmu: %d, k: %d)",
                 final_batch,
                 free_gb,
                 effective_safety,
                 est,
                 na,
+                nf,
+                nt,
+                nmu,
+                k,
             )
 
         return final_batch
@@ -77,12 +128,32 @@ def _adaptive_batch_size(
 
 
 def _to_device(x):
+    """Transfer a NumPy array-like to the current GPU device.
+
+    Args:
+        x: Array-like object convertible to ``cp.ndarray``.
+
+    Returns:
+        cupy.ndarray on the active device.
+    """
     return cp.asarray(x)
 
 
 def safe_svd(
     A: np.ndarray, full_matrices: bool = False
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Compute SVD on GPU with CPU NumPy arrays returned.
+
+    Args:
+        A: Input matrix (will be copied to device as float64, C-order).
+        full_matrices: Whether to compute full-sized U/VH.
+
+    Returns:
+        Tuple of (U, S, VH) as NumPy arrays.
+
+    Raises:
+        RuntimeError: If the GPU SVD fails for any reason.
+    """
     A_gpu = _to_device(np.asarray(A, dtype=np.float64, order="C"))
     try:
         u, s, vh = cp.linalg.svd(A_gpu, full_matrices=full_matrices)
@@ -93,6 +164,18 @@ def safe_svd(
 
 
 def safe_pinv(A: np.ndarray, rcond: float = 1e-12) -> np.ndarray:
+    """Numerically robust Moore–Penrose pseudoinverse on GPU.
+
+    Applies clipping and NaN/inf sanitization before SVD to improve
+    stability with ill-conditioned inputs.
+
+    Args:
+        A: Input matrix (NumPy) to invert.
+        rcond: Relative threshold for singular value truncation.
+
+    Returns:
+        NumPy array containing the pseudoinverse of ``A``.
+    """
     A = np.asarray(A, dtype=np.float64, order="C")
     if not np.isfinite(A).all():
         A = np.nan_to_num(A, nan=0.0, posinf=1e30, neginf=-1e30)
@@ -104,11 +187,21 @@ def safe_pinv(A: np.ndarray, rcond: float = 1e-12) -> np.ndarray:
 
 
 def dem_inv_gsvd(A: np.ndarray, B: np.ndarray):
+    """Compute GSVD-like factors used in the DEM reconstruction.
+
+    Args:
+        A: Response matrix A (nf x nt or compatible).
+        B: Diagonal scaling matrix B.
+
+    Returns:
+        Tuple ``(alpha, beta, U_T, V_T, W)`` consistent with the DEM
+        formulation used by the solver.
+    """
     AB1 = A @ safe_pinv(B)
     sze = AB1.shape
     C = np.zeros([max(sze), max(sze)])
     C[: sze[0], : sze[1]] = AB1
-    u, s, v = safe_svd(C, full_matrices=False)  # Use economic SVD
+    u, s, v = safe_svd(C, full_matrices=False)
     beta = 1.0 / np.sqrt(1.0 + s**2)
     alpha = s * beta
     SB = np.diag(beta)
@@ -118,6 +211,21 @@ def dem_inv_gsvd(A: np.ndarray, B: np.ndarray):
 
 
 def dem_reg_map(sigmaa, sigmab, U, W, data, err, reg_tweak, nmu=500):
+    """Select Tikhonov regularization strength for a single pixel.
+
+    Args:
+        sigmaa: Singular values for A.
+        sigmab: Singular values for B.
+        U: Left singular vectors (2D array) compatible with ``data``.
+        W: Transformation matrix used in DEM reconstruction.
+        data: Observed data vector ``d`` (nf,).
+        err: Uncertainty vector ``ed`` (nf,).
+        reg_tweak: Scalar factor multiplying the chi-square target.
+        nmu: Number of candidates in the geometric grid over ``mu``.
+
+    Returns:
+        Selected regularization strength (float).
+    """
     data = cp.asarray(data)
     err = cp.asarray(err)
     nf = data.shape[0]
@@ -170,6 +278,19 @@ def _batch_select_lambda(
     reg_tweak: float,
     nmu: int,
 ) -> "cp.ndarray":
+    """Vectorized lambda selection for a batch of samples on device.
+
+    Args:
+        u_b: Batched U matrices (batch, nf, k).
+        s_b: Batched singular values (batch, k).
+        dn_b: Batched data (batch, nf).
+        ed_b: Batched uncertainties (batch, nf).
+        reg_tweak: Target chi-square scaling factor.
+        nmu: Number of candidate ``mu`` values to test.
+
+    Returns:
+        Vector of selected ``mu`` of shape ``(batch,)`` on device.
+    """
     batch = dn_b.shape[0]
     # d' = d / ed
     dprime = dn_b / ed_b
@@ -198,7 +319,12 @@ def _batch_select_lambda(
 
 
 class GPUWorkspaceManager:
-    """GPU workspaces to reduce allocation overhead for large images."""
+    """Manage reusable GPU workspaces/pools for large images.
+
+    The manager caches arrays keyed by shape/dtype/name, reducing allocator
+    overhead when processing many batches. When CuPy's default memory pool is
+    available, it is used to back allocations for improved performance.
+    """
 
     def __init__(self):
         self.workspaces = {}
@@ -210,7 +336,16 @@ class GPUWorkspaceManager:
         self.pinned_pool = _get_pinned() if callable(_get_pinned) else None
 
     def get_workspace(self, shape, dtype, name="default"):
-        """Get or create a workspace array on GPU."""
+        """Get or create a workspace array on the GPU.
+
+        Args:
+            shape: Array shape.
+            dtype: NumPy/CuPy dtype.
+            name: Logical name used as part of the cache key.
+
+        Returns:
+            cupy.ndarray or ``None`` if allocation fails.
+        """
         key = (tuple(shape), dtype, name)
         if key not in self.workspaces:
             try:
@@ -228,7 +363,16 @@ class GPUWorkspaceManager:
         return self.workspaces[key]
 
     def get_workspace_with_pool(self, shape, dtype, name="default"):
-        """Get workspace using memory pool for better performance."""
+        """Get a pooled workspace array when a CuPy memory pool is present.
+
+        Args:
+            shape: Array shape.
+            dtype: NumPy/CuPy dtype.
+            name: Logical name used as part of the cache key.
+
+        Returns:
+            cupy.ndarray or ``None`` if allocation fails.
+        """
         key = (tuple(shape), dtype, name)
         if key not in self.workspaces:
             try:
@@ -255,7 +399,7 @@ class GPUWorkspaceManager:
         return self.workspaces[key]
 
     def clear_workspaces(self):
-        """Clear all workspace arrays to free GPU memory."""
+        """Clear cached arrays and free CuPy pool blocks if available."""
         count = len(self.workspaces)
         self.workspaces.clear()
         # Force memory pool cleanup for large datasets
@@ -269,7 +413,11 @@ class GPUWorkspaceManager:
             )
 
     def get_memory_usage(self):
-        """Get current memory pool usage statistics."""
+        """Return memory pool usage statistics.
+
+        Returns:
+            Dict with keys ``used_mb``, ``total_mb``, ``utilization``.
+        """
         try:
             if self.memory_pool is None:
                 return {"used_mb": 0, "total_mb": 0, "utilization": 0}
@@ -307,6 +455,20 @@ except Exception:
 
 
 def _residuals_and_chisq(dn_b, dn_reg_device, ed_b, nf):
+    """Compute residuals and per-sample chi-square on device.
+
+    Uses a fused kernel when available unless disabled via
+    ``MULTIGPU_NO_FUSE=1``.
+
+    Args:
+        dn_b: Batched observed data (batch, nf).
+        dn_reg_device: Batched model predictions (batch, nf) on device.
+        ed_b: Batched uncertainties (batch, nf) on device.
+        nf: Number of filters (normalization factor).
+
+    Returns:
+        Tuple ``(residuals_device, chisq_device)`` on device.
+    """
     # Allow disabling the fused kernel for determinism/debugging
     if os.environ.get("MULTIGPU_NO_FUSE", "0") == "1":
         residuals_device = (dn_b - dn_reg_device) / ed_b
@@ -316,6 +478,11 @@ def _residuals_and_chisq(dn_b, dn_reg_device, ed_b, nf):
 
 
 def dem_pix(*_a, **_k):  # pragma: no cover
+    """Legacy single-pixel entry point.
+
+    Raises:
+        RuntimeError: Always; use :func:`demmap_pos` instead.
+    """
     raise RuntimeError("dem_pix unsupported in multiGPU module; use demmap_pos")
 
 
@@ -330,11 +497,41 @@ def demmap_pos(
     max_iter=10,
     rgt_fact=1.5,
     dem_norm0=None,
-    nmu=42,
+    nmu=24,
     warn=False,
     l_emd=False,
     rscl=False,
 ):
+    """Reconstruct DEM for many samples on GPU with batched processing.
+
+    This is the multi-sample GPU implementation used by the orchestrator.
+    It performs a rectangular SVD per batch and selects a Tikhonov
+    regularization parameter per sample, optionally overlapping compute and
+    transfers using CUDA streams and pinned host memory.
+
+    Args:
+        dd: Observed data matrix with shape ``(na, nf)``.
+        ed: Uncertainty matrix with shape ``(na, nf)``.
+        rmatrix: Temperature response matrix of shape ``(nt, nf)``.
+        logt: Temperature grid ``log10(T)`` of shape ``(nt,)``.
+        dlogt: Bin widths for ``logt`` of shape ``(nt,)``.
+        glc: Gain/linear coefficients per filter (unused placeholder).
+        reg_tweak: Chi-square target scaling factor.
+        max_iter: Unused (kept for API compatibility).
+        rgt_fact: Unused (kept for API compatibility).
+        dem_norm0: Unused (kept for API compatibility).
+        nmu: Number of candidate ``mu`` values for regularization.
+        warn: Unused (kept for API compatibility).
+        l_emd: Unused (kept for API compatibility).
+        rscl: Unused (kept for API compatibility).
+
+    Returns:
+        Tuple of NumPy arrays ``(dem, edem, elogt, chisq, dn_reg)`` where
+        ``dem`` has shape ``(na, nt)`` and ``dn_reg`` has shape ``(na, nf)``.
+
+    Raises:
+        RuntimeError: If the GPU path fails during processing.
+    """
     na = dd.shape[0]
     nt = logt.shape[0]
     dem = _np.zeros((na, nt))
@@ -351,7 +548,7 @@ def demmap_pos(
         B_inv = cp.linalg.pinv(L)
         nf_dev = rmatrix_d.shape[1]
         nt_dev = rmatrix_d.shape[0]
-        batch_size = _adaptive_batch_size(na, nf_dev, nt_dev)
+        batch_size = _adaptive_batch_size(na, nf_dev, nt_dev, nmu)
         initial_batch = batch_size
         b0 = 0
 

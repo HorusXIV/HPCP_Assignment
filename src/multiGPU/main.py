@@ -1,9 +1,11 @@
-"""Entry point for launching multi-GPU DEM computations with explicit MPI.
+"""Launch multi-GPU DEM computations with explicit MPI orchestration.
 
-This script initializes MPI, binds ranks to GPUs, scatters input rows, executes
-GPU kernels, gathers results, and saves a single aggregated output per input.
-Batching is handled inside `gpu_kernels.demmap_pos`; no per-rank fallback files
-or manual batching in this orchestrator.
+High-level flow
+1) Initialize/broadcast MPI state and map ranks to GPUs.
+2) Rank 0 enumerates inputs and broadcasts the worklist.
+3) For each input, rank 0 loads and scatters rows to all ranks.
+4) Ranks call the GPU kernel once (internal batching), gather DEMs.
+5) Rank 0 saves a single aggregated output per input.
 """
 
 from __future__ import annotations
@@ -22,6 +24,11 @@ from . import logging as mlog
 
 
 def parse_args():
+    """Parse CLI arguments for the multi-GPU entry point.
+
+    Returns:
+        argparse.Namespace containing the parsed options.
+    """
     p = argparse.ArgumentParser()
     p.add_argument(
         "--input-dir",
@@ -41,6 +48,12 @@ def parse_args():
 
 
 def main():
+    """Program entrypoint when executed as ``python -m src.multiGPU.main``.
+
+    Initializes MPI, logging, rank-to-GPU binding, handles I/O, and invokes
+    the GPU kernels. Errors are allowed to propagate to ensure proper Slurm
+    failure signaling.
+    """
     args = parse_args()
 
     # MPI init once
@@ -69,8 +82,7 @@ def main():
         str(gpu_assigned),
     )
 
-    # Optional: register preemption handlers to enable graceful shutdown
-    # Enable with env MULTIGPU_PREEMPT=1
+    # Optional preemption handling (enable via MULTIGPU_PREEMPT=1)
     if os.environ.get("MULTIGPU_PREEMPT", "0") == "1":
         try:
             from . import preempt as _preempt
@@ -113,7 +125,7 @@ def main():
     if rank == 0:
         print("Processing %d input files across %d ranks" % (len(all_inputs), size))
 
-    # Iterate inputs; rank 0 loads, scatter rows; all ranks compute and gather
+    # Iterate inputs: rank 0 loads/scatters; all ranks compute/gather
     for input_path in all_inputs:
         file_label = f"PROCESS_FILE:{os.path.basename(input_path)}"
         with nvtx_range(file_label, color=0xFF9800):
@@ -219,7 +231,7 @@ def main():
                 if gpu_assigned is None or gpu_assigned < 0:
                     raise RuntimeError("No GPU assigned for multiGPU execution")
 
-                # Compute once; internal batching in demmap_pos
+                # Compute once; internal batching happens inside demmap_pos
                 with nvtx_range("GPU_COMPUTE", color=0xE65100):
                     dem_local, edem_local, elogt_local, chisq_local, dn_reg_local = (
                         gpu_kernels.demmap_pos(
@@ -278,7 +290,7 @@ def main():
             except Exception as e:
                 logging.getLogger(__name__).warning("Final MPI barrier failed: %s", e)
 
-    # Clean shutdown of logging to ensure all records are flushed
+    # Clean shutdown of logging
     with nvtx_range("SHUTDOWN", color=0x9E9E9E):
         mlog.shutdown_logging()
 

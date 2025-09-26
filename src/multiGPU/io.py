@@ -1,22 +1,37 @@
-"""I/O helpers for multiGPU package.
+"""I/O helpers for the multi-GPU DEM solver.
 
-We provide a minimal loader to read `.npz` files used by the assignment data
-and convert them to structures that the compute kernels expect.
+Minimal utilities to load ``.npz`` inputs and ensure array shapes match the
+expectations of the GPU kernels.
 """
+
 import numpy as np
 from typing import Any, Dict
 
 
 def load_npz(path: str) -> Dict[str, Any]:
-    """Load an npz file and return a dict of arrays."""
+    """Load ``.npz`` content into a regular dictionary.
+
+    Args:
+        path: Filesystem path to a ``.npz`` file.
+
+    Returns:
+        Dict mapping array names to NumPy arrays or objects stored within.
+    """
     data = np.load(path, allow_pickle=True)
     return dict(data)
 
 
 def ensure_2d_dn(dn: np.ndarray) -> np.ndarray:
-    """Ensure `dn` has shape (n_samples, n_filters) as expected by demmap_pos wrapper.
+    """Return ``dn`` with shape ``(n_samples, n_filters)``.
 
-    Accepts 1D/2D/3D and flattens spatial dims to the first axis.
+    Accepts 1D/2D/3D inputs and flattens leading spatial dimensions to the
+    sample axis. This is a convenience for simple dataset variants.
+
+    Args:
+        dn: Input array of band measurements.
+
+    Returns:
+        2D NumPy array with samples along axis 0 and filters along axis 1.
     """
     dn = np.asarray(dn)
     if dn.ndim == 1:

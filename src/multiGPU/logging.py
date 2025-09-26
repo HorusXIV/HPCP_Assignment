@@ -1,10 +1,10 @@
-"""Rank-aware logging utilities for multiGPU package.
+"""Rank-aware logging utilities for the multi-GPU solver.
 
-Lightweight per-rank file logging (no multiprocessing queues).
-This avoids shutdown hangs on some platforms (notably Windows) that can
-occur when `multiprocessing.Queue` feeder threads aren't joined.
-Use `setup_logging` from each MPI rank and call `shutdown_logging` on exit.
+Provides simple, robust logging per MPI rank without background queue
+threads. This minimizes shutdown hazards on some platforms and keeps Slurm
+outputs tidy by limiting console logs to rank 0.
 """
+
 from __future__ import annotations
 
 import logging
@@ -17,6 +17,12 @@ _listener: Optional[logging.handlers.QueueListener] = None  # API compat
 
 
 class RankFilter(logging.Filter):
+    """Attach the MPI rank to log records.
+
+    Args:
+        rank: Integer MPI rank to record as ``record.rank``.
+    """
+
     def __init__(self, rank: int):
         super().__init__()
         self.rank = rank
@@ -28,34 +34,27 @@ class RankFilter(logging.Filter):
 
 
 class ConsoleFilter(logging.Filter):
-    """Allow only warnings/errors or records explicitly marked as general.
+    """Filter console messages to warnings/errors or "general" records.
 
-    This keeps rank-specific chatter out of the console (general) log while
-    still showing important warnings/errors. To mark a record as general,
-    log with extra={"general": True}.
+    To mark a message as general (shown on rank 0 console), log with
+    ``extra={"general": True}``.
     """
 
-    def filter(
-        self, record: logging.LogRecord
-    ) -> bool:  # type: ignore[override]
+    def filter(self, record: logging.LogRecord) -> bool:  # type: ignore[override]
         if record.levelno >= logging.WARNING:
             return True
         return bool(getattr(record, "general", False))
 
 
 def _make_formatter():
-    fmt = (
-        "%(asctime)s - rank=%(rank)s - %(levelname)s - "
-        "%(name)s - %(message)s"
-    )
+    """Return a formatter that tolerates missing ``rank`` attribute."""
+    fmt = "%(asctime)s - rank=%(rank)s - %(levelname)s - %(name)s - %(message)s"
 
     # Use a SafeFormatter that provides a default for missing fields like
     # `rank`.
 
     class SafeFormatter(logging.Formatter):
-        def format(
-            self, record: logging.LogRecord
-        ) -> str:  # type: ignore[override]
+        def format(self, record: logging.LogRecord) -> str:  # type: ignore[override]
             if not hasattr(record, "rank"):
                 # attach a safe default if missing
                 setattr(record, "rank", "-")
@@ -64,17 +63,18 @@ def _make_formatter():
     return SafeFormatter(fmt)
 
 
-def setup_logging(
-    results_dir: str, rank: int = 0, size: int = 1, console: bool = True
-):
-    """Initialize logging for this MPI rank (per-rank file, optional console).
+def setup_logging(results_dir: str, rank: int = 0, size: int = 1, console: bool = True):
+    """Initialize per-rank logging and optional rank-0 console output.
 
-    - `results_dir`: directory to place `logs/` into (will be created)
-    - `rank`: MPI rank integer
-    - `size`: total MPI size (unused; retained for API stability)
-    - `console`: whether to also emit to stderr (rank 0 only)
+    Args:
+        results_dir: Directory under which a ``logs/`` subfolder will be
+            created for per-rank logs when enabled.
+        rank: MPI rank id.
+        size: MPI world size (unused; reserved for API stability).
+        console: If True, stream to stdout on rank 0.
 
-    Returns: configured root logger
+    Returns:
+        The configured root logger.
     """
     os.makedirs(results_dir, exist_ok=True)
     root = logging.getLogger()
@@ -95,14 +95,11 @@ def setup_logging(
 
     # Per-rank file handler (disabled in quiet mode unless forced)
     quiet_mode = (
-        _lvl >= logging.WARNING
-        and os.environ.get("MULTIGPU_QUIET", "1") == "1"
+        _lvl >= logging.WARNING and os.environ.get("MULTIGPU_QUIET", "1") == "1"
     )
     want_rank_files = os.environ.get("MULTIGPU_RANK_FILES", "0") == "1"
     if (not quiet_mode) or want_rank_files:
-        per_rank_log = os.path.join(
-            results_dir, "logs", f"rank{rank:03d}.log"
-        )
+        per_rank_log = os.path.join(results_dir, "logs", f"rank{rank:03d}.log")
         os.makedirs(os.path.dirname(per_rank_log), exist_ok=True)
         fh_rank = logging.FileHandler(per_rank_log, mode="a")
         fh_rank.setLevel(_lvl)
@@ -125,11 +122,7 @@ def setup_logging(
 
 
 def shutdown_logging():
-    """Flush and close all handlers.
-
-    Keeping this simple ensures fast, clean shutdown without hanging
-    on background threads.
-    """
+    """Flush and close handlers for a clean shutdown."""
     root = logging.getLogger()
     for h in list(root.handlers):
         try:

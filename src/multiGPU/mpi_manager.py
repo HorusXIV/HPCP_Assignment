@@ -1,7 +1,8 @@
 """MPI process and GPU mapping helpers.
 
-Provides a small abstraction on top of mpi4py for rank<->GPU mapping,
-collectives, and a simple error/heartbeat mechanism.
+Small utilities on top of mpi4py for rank-to-GPU mapping, collective
+operations on 2D arrays, and minimal synchronization helpers suitable for
+HPC batch execution.
 """
 
 from typing import Optional
@@ -24,7 +25,7 @@ except Exception:
 
 
 def _require_cupy() -> None:
-    """Raise ImportError with guidance if CuPy cannot be imported."""
+    """Ensure CuPy is importable or raise an informative ImportError."""
     try:
         import cupy  # noqa: F401
     except Exception as e:
@@ -36,10 +37,10 @@ def _require_cupy() -> None:
 
 
 def init_mpi():
-    """Initialize MPI and return (comm, rank, size).
+    """Initialize MPI and return a triple ``(comm, rank, size)``.
 
-    If mpi4py is not available the function returns a serial stub where
-    rank=0 and size=1 so code can still run for local debugging.
+    Returns a serial-compatible stub when ``mpi4py`` is unavailable to
+    keep local development paths simple.
     """
     if MPI is None:
         return None, 0, 1
@@ -51,11 +52,11 @@ def init_mpi():
 
 
 def get_local_rank_info(comm):
-    """Return (local_rank, local_size, node_name) using shared-memory split.
+    """Return ``(local_rank, local_size, node_name)`` for this process.
 
-    Uses `COMM_TYPE_SHARED` to create a node-local communicator and obtain
-    precise `local_rank`/`local_size`. Falls back to hostname grouping if
-    mpi4py lacks `Split_type`. If MPI not available returns (0,1,hostname).
+    Prefer a shared-memory split to determine per-node rank/size and
+    fall back to hostname grouping if necessary. In serial mode returns
+    ``(0, 1, hostname)``.
     """
     import socket
 
@@ -85,11 +86,16 @@ def get_local_rank_info(comm):
 
 
 def scatterv_array(comm, array, counts, dtype=None):
-    """Scatter a 2D array (rows) across ranks using counts list.
+    """Scatter rows of a 2D array across ranks using byte-precise MPI calls.
 
-    - `array` is only required on root (rank 0); other ranks pass None.
-    - `counts` is number of rows to send to each rank and must sum to rows.
-    Returns local slice (numpy.ndarray) on each rank.
+    Args:
+        comm: MPI communicator.
+        array: 2D array on root; ``None`` on other ranks.
+        counts: List of row counts per rank; must sum to total rows.
+        dtype: Data type for non-root allocation if ``array`` is ``None``.
+
+    Returns:
+        Local 2D slice on each rank.
     """
     import numpy as _np
 
@@ -143,9 +149,16 @@ def scatterv_array(comm, array, counts, dtype=None):
 
 
 def gatherv_array(comm, local_array, counts, root=0):
-    """Gather a 2D local_array from all ranks into a single array on root.
+    """Gather rows from all ranks into a single 2D array on ``root``.
 
-    Returns the full array on root, and None on other ranks.
+    Args:
+        comm: MPI communicator.
+        local_array: 2D local block on the current rank.
+        counts: Row counts per rank (same list used in scatterv).
+        root: Root rank that receives the full array.
+
+    Returns:
+        Full array on ``root``; ``None`` on other ranks.
     """
     import numpy as _np
 
@@ -182,15 +195,16 @@ def gatherv_array(comm, local_array, counts, root=0):
 
 
 def set_device_for_local_rank(comm, prefer_visible=True):
-    """Bind the current process to a GPU according to node-local rank.
+    """Bind the process to a GPU index based on node-local rank.
 
     Strategy:
-    - If `CUDA_VISIBLE_DEVICES` is already set, parse it and pick the
-      device string corresponding to the local rank modulo that list.
-    - Otherwise, query CuPy for device count or fall back to env `N_GPUS`.
-    - Set `CUDA_VISIBLE_DEVICES` to the chosen device string and perform a
-      lightweight runtime health check (tiny allocation) to ensure the
-      device is usable. If the test fails, return -1.
+    1) Respect ``CUDA_VISIBLE_DEVICES`` if present.
+    2) Otherwise query CuPy for device count; fall back to ``N_GPUS``.
+    3) Set ``CUDA_VISIBLE_DEVICES`` and perform a tiny runtime allocation
+       to validate the device; return ``-1`` on failure.
+
+    Returns:
+        The chosen local device index or ``-1`` when no device is usable.
     """
     if comm is None:
         local_rank = 0
@@ -255,11 +269,7 @@ def set_device_for_local_rank(comm, prefer_visible=True):
 
 
 def map_rank_to_gpu(rank: int, gpus_per_node: Optional[int] = None) -> int:
-    """Map an MPI rank to a local GPU index.
-
-    Strategy: use `CUDA_VISIBLE_DEVICES` if set; otherwise assume GPUs
-    are numbered 0..n-1 on each node and bind ranks cyclically.
-    """
+    """Return a cyclic mapping from rank to local GPU index."""
     try:
         if cp is not None:
             n_gpus = cp.cuda.runtime.getDeviceCount()
@@ -278,10 +288,9 @@ def map_rank_to_gpu(rank: int, gpus_per_node: Optional[int] = None) -> int:
 
 
 def bind_gpu(gpu_index: int):
-    """Set environment to bind current process to a GPU index (local index).
+    """Set ``CUDA_VISIBLE_DEVICES`` to bind the process to a GPU.
 
-    This sets `CUDA_VISIBLE_DEVICES` for consistency with child processes.
-    The caller should still select the device inside CuPy/numba if needed.
+    The caller should still activate the device in CuPy/Numba when needed.
     """
     if gpu_index < 0:
         return
@@ -289,7 +298,7 @@ def bind_gpu(gpu_index: int):
 
 
 def barrier(comm):
+    """Synchronize all ranks if MPI is available."""
     if comm is None:
         return
     comm.Barrier()
-
