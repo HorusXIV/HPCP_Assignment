@@ -1,6 +1,5 @@
 #!/bin/bash -l
 #SBATCH --job-name=HPCP_MultiGPU_OPT
-#SBATCH --job-name=HPCP_MultiGPU_OPT
 #SBATCH --partition=performance
 #SBATCH --time=24:00:00
 #SBATCH --nodes=1
@@ -9,14 +8,13 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --hint=nomultithread           # prefer physical cores for tighter binding
 #SBATCH --mem=64G
+#SBATCH --exclusive
+#SBATCH --signal=USR1@60
 #SBATCH --output=src/multiGPU/results_Test/logs/opt-%j.out
 #SBATCH --error=src/multiGPU/results_Test/logs/opt-%j.err
 
 set -euo pipefail
 
-# -------------------------------
-# Tunables (override via sbatch --export VAR=...)
-# -------------------------------
 # -------------------------------
 # Tunables (override via sbatch --export VAR=...)
 # -------------------------------
@@ -28,7 +26,7 @@ MAX_SAMPLES="${MAX_SAMPLES:-100000}"
 LOG_ROOT="${LOG_ROOT:-$REPO_DIR/src/multiGPU/results_Test}"
 
 PROFILE="${PROFILE:-0}"              # set 1 to enable Nsight Systems
-NSYS_OPTS="${NSYS_OPTS:-cuda,nvtx,osrt,cublas,cusolver}"  # Enhanced for GPU kernel analysis
+NSYS_OPTS="${NSYS_OPTS:-cuda,nvtx}"  # To enhance: add: osrt,cublas,cusolver
 
 MULTIGPU_NVTX="${MULTIGPU_NVTX:-0}" # NVTX phase annotation toggle (Python + CuPy)
 # CUDA streams overlap toggles (see PERFORMANCE_OPTIMIZATIONS.md)
@@ -109,16 +107,18 @@ if [[ "${SLURM_PROCID:-0}" == "0" ]] && command -v nvidia-smi &>/dev/null; then
   nvidia-smi topo -m || true
 fi
 
-# Prepare poetry env inside container (performed once per job; races avoided by lock dir)
+# Prepare poetry env inside container (performed once per job; avoid redundant installs)
 export POETRY_VIRTUALENVS_PATH="/workspace/.venv"
 export POETRY_CACHE_DIR="/workspace/.cache/pypoetry"
 
-# Simple file lock to avoid redundant installation storms
-# Simple file lock to avoid redundant installation storms
+# Use a simple sentinel to avoid repeated installs when sharing writable image/overlay
 singularity exec --cleanenv --nv --bind "$REPO_DIR":/workspace "$IMAGE" \
-    bash -lc 'cd /workspace
-    if command -v poetry &>/dev/null
-      then poetry install --no-interaction --no-ansi
+  bash -lc 'set -e; cd /workspace; \
+    if command -v poetry &>/dev/null; then \
+      if [ ! -f .venv/.installed ]; then \
+        poetry install --no-interaction --no-ansi; \
+        touch .venv/.installed; \
+      fi; \
     fi'
 
 
@@ -130,7 +130,7 @@ if [[ "$PROFILE" == "1" ]]; then
     mkdir -p "$NSYS_OUT_DIR_HOST" "$NSYS_TMP_DIR_HOST"
     
     # Use comprehensive nsys profile options for GPU kernel analysis
-    PROFILE_CMD="nsys profile -t ${NSYS_OPTS} --force-overwrite=true --cuda-memory-usage=true --output=${NSYS_OUT_DIR_CTR}/nsys_rank%q{SLURM_PROCID}"
+  PROFILE_CMD="nsys profile -t ${NSYS_OPTS} --force-overwrite=true --cuda-memory-usage=true --output=${NSYS_OUT_DIR_CTR}/nsys_rank%q{SLURM_PROCID}"
     
   # Set TMPDIR inside the container (not on the host) for nsys temp files
   # Use Singularity's env passthrough to avoid Slurm creating host paths

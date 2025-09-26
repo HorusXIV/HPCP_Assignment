@@ -1,5 +1,6 @@
 # src/dask/runner.py
 from __future__ import annotations
+
 """
 Dask cluster runner.
 
@@ -23,7 +24,7 @@ import logging
 import os
 from typing import Any, Callable, Optional, Tuple
 
-from dask.distributed import Client, LocalCluster
+# Import dask.distributed lazily within builders to keep import-time light
 from src.common.paths import slurm_context
 from src.common.threads import early_env_caps  # ensure BLAS/Omp threads are capped
 
@@ -104,6 +105,9 @@ def _build_local_cluster(args):
         sctx.get("array_task_id"),
         local_directory,
     )
+
+    # Import here to avoid hard dependency during test collection
+    from dask.distributed import LocalCluster  # type: ignore
 
     cluster = LocalCluster(
         n_workers=n_workers,
@@ -229,7 +233,7 @@ def _build_slurm_cluster(args):
     return cluster
 
 
-def create_cluster(args) -> Tuple[Any, Client]:
+def create_cluster(args) -> Tuple[Any, Any]:
     """
     Build a cluster (local or SLURM) and return it with a connected Client.
 
@@ -254,6 +258,9 @@ def create_cluster(args) -> Tuple[Any, Client]:
     cluster = (
         _build_local_cluster(args) if mode == "local" else _build_slurm_cluster(args)
     )
+    # Import here to avoid hard dependency during test collection
+    from dask.distributed import Client  # type: ignore
+
     client = Client(cluster)
     return cluster, client
 
@@ -370,7 +377,7 @@ def run_dask_suite(*, client=None, args=None, **_ignored) -> int:
 
     Parameters
     ----------
-    client : dask.distributed.Client | None
+    client : Any
         An existing Dask client. If None, the shim does nothing.
     args : Any
         Optional argument namespace to pass to the workload.
@@ -393,13 +400,17 @@ def run_dask_suite(*, client=None, args=None, **_ignored) -> int:
             fn = getattr(m, func, None)
             if callable(fn):
                 log.info("run_dask_suite: dispatching to %s:%s", mod, func)
-                try:
-                    fn(client=client, args=args)
-                except TypeError:
+                # Try a few common call signatures
+                for call in (
+                    lambda: fn(client=client, args=args),
+                    lambda: fn(client),
+                    lambda: fn(),
+                ):
                     try:
-                        fn(client)
+                        call()
+                        break
                     except TypeError:
-                        fn()
+                        continue
                 return 0
         except Exception:
             continue
