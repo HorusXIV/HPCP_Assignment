@@ -45,7 +45,6 @@ def register_preempt_handlers(
     """
     if signals is None:
         # common scheduler signals: SIGTERM, SIGINT;
-        # SLURM may use SIGUSR1 for preemption
         signals = [signal.SIGTERM, signal.SIGINT]
         if hasattr(signal, "SIGUSR1"):
             signals.append(signal.SIGUSR1)
@@ -74,14 +73,12 @@ def register_preempt_handlers(
                 comm.Barrier()
         except Exception:
             pass
-        # exit with non-zero to indicate abnormal termination to scheduler
         sys.exit(2)
 
     for s in signals:
         try:
             signal.signal(s, _handler)
         except Exception:
-            # some signals cannot be caught on certain platforms
             pass
 
 

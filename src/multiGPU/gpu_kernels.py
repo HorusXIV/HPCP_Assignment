@@ -367,11 +367,10 @@ class GPUWorkspaceManager:
                     dtype,
                 )
             except Exception as e:
-                self.logger.warning
-                (
-                    "Failed to allocate workspace %s: %s",
-                    name,
-                    e
+                # Correctly call logger.warning (previously broken by a
+                # line split)
+                self.logger.warning(
+                    "Failed to allocate workspace %s: %s", name, e
                 )
                 return None
         return self.workspaces[key]
@@ -548,6 +547,17 @@ def demmap_pos(
     Raises:
         RuntimeError: If the GPU path fails during processing.
     """
+    # Optional Python-level NVTX (works when nvtx Python package is available)
+    try:
+        from src.common.nvtx import nvtx_range as _nvtx_py
+    except Exception:
+        # Fallback no-op context if helper not importable
+        from contextlib import contextmanager as _cm
+
+        @_cm
+        def _nvtx_py(_msg, color=None):  # type: ignore
+            yield
+
     na = dd.shape[0]
     nt = logt.shape[0]
     dem = _np.zeros((na, nt))
@@ -556,17 +566,18 @@ def demmap_pos(
     chisq = _np.zeros((na,))
     dn_reg = _np.zeros((na, rmatrix.shape[1]))
     try:
-        dd_d = cp.asarray(dd, dtype=cp.float64)
-        ed_d = cp.asarray(ed, dtype=cp.float64)
-        rmatrix_d = cp.asarray(rmatrix, dtype=cp.float64)
-        dlogt_d = cp.asarray(dlogt, dtype=cp.float64)
-        L = cp.diag(1.0 / cp.sqrt(dlogt_d))
-        B_inv = cp.linalg.pinv(L)
-        nf_dev = rmatrix_d.shape[1]
-        nt_dev = rmatrix_d.shape[0]
-        batch_size = _adaptive_batch_size(na, nf_dev, nt_dev, nmu)
-        initial_batch = batch_size
-        b0 = 0
+        with _nvtx_py("DEM_SOLVE_INIT", color=0x455A64):
+            dd_d = cp.asarray(dd, dtype=cp.float64)
+            ed_d = cp.asarray(ed, dtype=cp.float64)
+            rmatrix_d = cp.asarray(rmatrix, dtype=cp.float64)
+            dlogt_d = cp.asarray(dlogt, dtype=cp.float64)
+            L = cp.diag(1.0 / cp.sqrt(dlogt_d))
+            B_inv = cp.linalg.pinv(L)
+            nf_dev = rmatrix_d.shape[1]
+            nt_dev = rmatrix_d.shape[0]
+            batch_size = _adaptive_batch_size(na, nf_dev, nt_dev, nmu)
+            initial_batch = batch_size
+            b0 = 0
 
         use_nvtx = os.environ.get("MULTIGPU_NVTX", "0") == "1"
         if use_nvtx:
@@ -625,8 +636,9 @@ def demmap_pos(
 
         # Pre-create streams
         if streams_enabled:
-            compute_stream = cp.cuda.Stream(non_blocking=True)
-            copy_stream = cp.cuda.Stream(non_blocking=True)
+            with _nvtx_py("STREAMS_INIT", color=0x00796B):
+                compute_stream = cp.cuda.Stream(non_blocking=True)
+                copy_stream = cp.cuda.Stream(non_blocking=True)
         else:
             compute_stream = None  # type: ignore
             copy_stream = None  # type: ignore
@@ -643,31 +655,32 @@ def demmap_pos(
 
         # Pinned buffer pool (round-robin)
         if streams_enabled:
-            pinned_pool = []
-            for _k in range(buf_depth):
-                host_dem, mem_dem = _alloc_pinned_array(
-                    (min(initial_batch, na), nt_dev), np.float64
-                )
-                host_dnreg, mem_dnreg = _alloc_pinned_array(
-                    (min(initial_batch, na), nf_dev), np.float64
-                )
-                host_chi, mem_chi = _alloc_pinned_array(
-                    (min(initial_batch, na),), np.float64
-                )
-                pinned_pool.append(
-                    {
-                        "dem": host_dem,
-                        "dem_mem": mem_dem,
-                        "dnreg": host_dnreg,
-                        "dnreg_mem": mem_dnreg,
-                        "chi": host_chi,
-                        "chi_mem": mem_chi,
-                    }
-                )
+            with _nvtx_py("PINNED_POOL_INIT", color=0x303F9F):
+                pinned_pool = []
+                for _k in range(buf_depth):
+                    host_dem, mem_dem = _alloc_pinned_array(
+                        (min(initial_batch, na), nt_dev), np.float64
+                    )
+                    host_dnreg, mem_dnreg = _alloc_pinned_array(
+                        (min(initial_batch, na), nf_dev), np.float64
+                    )
+                    host_chi, mem_chi = _alloc_pinned_array(
+                        (min(initial_batch, na),), np.float64
+                    )
+                    pinned_pool.append(
+                        {
+                            "dem": host_dem,
+                            "dem_mem": mem_dem,
+                            "dnreg": host_dnreg,
+                            "dnreg_mem": mem_dnreg,
+                            "chi": host_chi,
+                            "chi_mem": mem_chi,
+                        }
+                    )
 
-            # Pending copy operations queue
-            # each item: dict with 'slice', 'buffers', 'done_event'
-            pending = deque()
+                # Pending copy operations queue
+                # each item: dict with 'slice', 'buffers', 'done_event'
+                pending = deque()
 
         while b0 < na:
             cur_batch = min(batch_size, na - b0)
@@ -676,76 +689,100 @@ def demmap_pos(
             # Quiet by default: suppress per-batch logs
 
             try:
-                _range_push("BATCH_PREP")
-                dn_b = dd_d[b0:b1, :]
-                ed_b = ed_d[b0:b1, :]
-                rmatrixin_b = rmatrix_d[None, :, :] * (1.0 / ed_b)[:, None, :]
-                A_batch = cp.transpose(rmatrixin_b, (0, 2, 1))
-                AB1 = A_batch @ B_inv  # (batch, nf, nt)
-                _range_pop()
+                with _nvtx_py(f"BATCH[{b0}:{b1})", color=0xFF6F00):
+                    _range_push("BATCH_PREP")
+                    dn_b = dd_d[b0:b1, :]
+                    ed_b = ed_d[b0:b1, :]
+                    rmatrixin_b = (
+                        rmatrix_d[None, :, :] * (1.0 / ed_b)[:, None, :]
+                    )
+                    A_batch = cp.transpose(rmatrixin_b, (0, 2, 1))
+                    AB1 = A_batch @ B_inv  # (batch, nf, nt)
+                    _range_pop()
 
-                # Deterministic per-sample path for CPU shim (no CUDA)
-                if use_per_sample_pipeline:
-                    for i in range(cur_batch):
-                        Ai = AB1[i]
-                        Ui, Si, VHi = cp.linalg.svd(Ai, full_matrices=False)
-                        # Single-sample lambda selection matching the
-                        # vectorized implementation
-                        dprime_i = dn_b[i] / ed_b[i]
-                        coef_i = cp.matmul(cp.transpose(Ui), dprime_i)
-                        eps = cp.finfo(cp.float64).tiny
-                        s_safe = cp.maximum(Si, eps)
-                        minx = cp.maximum(
-                            (cp.min(s_safe) ** 2) * 1e-4, cp.array(1e-300)
-                        )
-                        maxx = cp.max(s_safe)
-                        maxx = maxx if maxx > minx else minx * 10.0
-                        nmu_eff = int(max(int(nmu), 2))
-                        t = cp.linspace(0.0, 1.0, nmu_eff, dtype=cp.float64)
-                        mu_vec = cp.exp(
-                            cp.log(minx) + (cp.log(maxx) - cp.log(minx)) * t
-                        )
-                        s2 = Si ** 2
-                        f = mu_vec[None, :] / (s2[:, None] + mu_vec[None, :])
-                        vals = (f * coef_i[:, None]) ** 2
-                        arg_sum = cp.sum(vals, axis=0)
-                        err_sq = cp.sum(ed_b[i] ** 2)
-                        discr = arg_sum - (err_sq * reg_tweak)
-                        idx = int(cp.argmin(cp.abs(discr)))
-                        lamb_i = mu_vec[idx]
-                        filt_i = Si / (s2 + lamb_i)
-                        x_prime_i = cp.matmul(
-                            cp.transpose(VHi), (filt_i * coef_i)
-                        )
-                        dem_out_i = cp.matmul(x_prime_i, B_inv)
-                        dn_reg_i = cp.matmul(dem_out_i, rmatrix_d)
-                        resid_i = (dn_b[i] - dn_reg_i) / ed_b[i]
-                        chisq_i = cp.sum(resid_i ** 2) / nf_dev
+                    # Deterministic per-sample path for CPU shim (no CUDA)
+                    if use_per_sample_pipeline:
+                        for i in range(cur_batch):
+                            Ai = AB1[i]
+                            Ui, Si, VHi = cp.linalg.svd(
+                                Ai, full_matrices=False
+                            )
+                            # Single-sample lambda selection matching the
+                            # vectorized implementation
+                            dprime_i = dn_b[i] / ed_b[i]
+                            coef_i = cp.matmul(cp.transpose(Ui), dprime_i)
+                            eps = cp.finfo(cp.float64).tiny
+                            s_safe = cp.maximum(Si, eps)
+                            minx = cp.maximum(
+                                (cp.min(s_safe) ** 2) * 1e-4,
+                                cp.array(1e-300),
+                            )
+                            maxx = cp.max(s_safe)
+                            maxx = maxx if maxx > minx else minx * 10.0
+                            nmu_eff = int(max(int(nmu), 2))
+                            t = cp.linspace(
+                                0.0, 1.0, nmu_eff, dtype=cp.float64
+                            )
+                            mu_vec = cp.exp(
+                                cp.log(minx)
+                                + (cp.log(maxx) - cp.log(minx)) * t
+                            )
+                            s2 = Si ** 2
+                            f = mu_vec[None, :] / (
+                                s2[:, None] + mu_vec[None, :]
+                            )
+                            vals = (f * coef_i[:, None]) ** 2
+                            arg_sum = cp.sum(vals, axis=0)
+                            err_sq = cp.sum(ed_b[i] ** 2)
+                            discr = arg_sum - (err_sq * reg_tweak)
+                            idx = int(cp.argmin(cp.abs(discr)))
+                            lamb_i = mu_vec[idx]
+                            filt_i = Si / (s2 + lamb_i)
+                            x_prime_i = cp.matmul(
+                                cp.transpose(VHi), (filt_i * coef_i)
+                            )
+                            dem_out_i = cp.matmul(x_prime_i, B_inv)
+                            dn_reg_i = cp.matmul(dem_out_i, rmatrix_d)
+                            resid_i = (dn_b[i] - dn_reg_i) / ed_b[i]
+                            chisq_i = cp.sum(resid_i ** 2) / nf_dev
 
-                        # Write back to host outputs
-                        dem[b0 + i, :] = cp.asnumpy(dem_out_i)[:nt_dev]
-                        dn_reg[b0 + i, :] = cp.asnumpy(dn_reg_i)
-                        chisq[b0 + i] = float(cp.asnumpy(chisq_i))
-                        edem[b0 + i, :] = np.abs(dem[b0 + i, :]) * 0.1
+                            # Write back to host outputs
+                            dem[b0 + i, :] = cp.asnumpy(dem_out_i)[:nt_dev]
+                            dn_reg[b0 + i, :] = cp.asnumpy(dn_reg_i)
+                            chisq[b0 + i] = float(cp.asnumpy(chisq_i))
+                            edem[b0 + i, :] = np.abs(
+                                dem[b0 + i, :]
+                            ) * 0.1
 
-                    b0 = b1
-                    batch_size = initial_batch
-                    continue
+                        b0 = b1
+                        batch_size = initial_batch
+                        continue
 
-                _range_push("SVD")
-                # Fast batched SVD path (GPU/CuPy or NumPy stack SVD)
-                if streams_enabled:
-                    with compute_stream:  # type: ignore[union-attr]
+                    _range_push("SVD")
+                    # Fast batched SVD path (GPU/CuPy or NumPy stack SVD)
+                    if streams_enabled:
+                        with compute_stream:  # type: ignore[union-attr]
+                            u_b, s_b, vh_b = cp.linalg.svd(
+                                AB1, full_matrices=False
+                            )
+                    else:
                         u_b, s_b, vh_b = cp.linalg.svd(
                             AB1, full_matrices=False
                         )
-                else:
-                    u_b, s_b, vh_b = cp.linalg.svd(AB1, full_matrices=False)
-                _range_pop()
+                    _range_pop()
 
-                _range_push("LAMBDA_SELECT")
-                if streams_enabled:
-                    with compute_stream:  # type: ignore[union-attr]
+                    _range_push("LAMBDA_SELECT")
+                    if streams_enabled:
+                        with compute_stream:  # type: ignore[union-attr]
+                            lambs_dev = _batch_select_lambda(
+                                u_b,
+                                s_b,
+                                dn_b,
+                                ed_b,
+                                reg_tweak,
+                                nmu,
+                            )
+                    else:
                         lambs_dev = _batch_select_lambda(
                             u_b,
                             s_b,
@@ -754,22 +791,41 @@ def demmap_pos(
                             reg_tweak,
                             nmu,
                         )
-                else:
-                    lambs_dev = _batch_select_lambda(
-                        u_b,
-                        s_b,
-                        dn_b,
-                        ed_b,
-                        reg_tweak,
-                        nmu,
-                    )
-                _range_pop()
-                # Reconstruction using rectangular SVD
-                _range_push("RECONSTRUCTION_CALC")
-                if streams_enabled:
-                    # Ensure reconstruction ops are
-                    # enqueued on the compute stream
-                    with compute_stream:  # type: ignore[union-attr]
+                    _range_pop()
+                    # Reconstruction using rectangular SVD
+                    _range_push("RECONSTRUCTION_CALC")
+                    if streams_enabled:
+                        # Ensure reconstruction ops are enqueued on the
+                        # compute stream
+                        with compute_stream:  # type: ignore[union-attr]
+                            # d' = d / ed
+                            dprime = dn_b / ed_b  # (batch, nf_dev)
+                            # c = U^T d'
+                            coef = cp.matmul(
+                                cp.transpose(u_b, (0, 2, 1)),
+                                dprime[:, :, None],
+                            ).squeeze(-1)  # (batch, k)
+                            # f = s / (s^2 + lambda)
+                            lambs_vec = lambs_dev[:, None]
+                            filt = s_b / (s_b**2 + lambs_vec)
+                            # x' = V * (f * c)
+                            x_prime = cp.matmul(
+                                cp.transpose(vh_b, (0, 2, 1)),
+                                (filt * coef)[:, :, None]
+                            ).squeeze(-1)  # (batch, nt_dev)
+                            # x = B^{-1} x'
+                            dem_out_device = cp.matmul(x_prime, B_inv)
+                            # predicted data
+                            dn_reg_device = cp.matmul(
+                                dem_out_device, rmatrix_d
+                            )
+                            residuals_device, chisq_device = (
+                                _residuals_and_chisq(
+                                    dn_b, dn_reg_device, ed_b, nf_dev
+                                )
+                            )
+                    else:
+                        # Synchronous path on default stream
                         # d' = d / ed
                         dprime = dn_b / ed_b  # (batch, nf_dev)
                         # c = U^T d'
@@ -791,65 +847,44 @@ def demmap_pos(
                         residuals_device, chisq_device = _residuals_and_chisq(
                             dn_b, dn_reg_device, ed_b, nf_dev
                         )
-                else:
-                    # Synchronous path on default stream
-                    # d' = d / ed
-                    dprime = dn_b / ed_b  # (batch, nf_dev)
-                    # c = U^T d'
-                    coef = cp.matmul(
-                        cp.transpose(u_b, (0, 2, 1)), dprime[:, :, None]
-                    ).squeeze(-1)  # (batch, k)
-                    # f = s / (s^2 + lambda)
-                    lambs_vec = lambs_dev[:, None]
-                    filt = s_b / (s_b**2 + lambs_vec)
-                    # x' = V * (f * c)
-                    x_prime = cp.matmul(
-                        cp.transpose(vh_b, (0, 2, 1)),
-                        (filt * coef)[:, :, None]
-                    ).squeeze(-1)  # (batch, nt_dev)
-                    # x = B^{-1} x'
-                    dem_out_device = cp.matmul(x_prime, B_inv)
-                    # predicted data
-                    dn_reg_device = cp.matmul(dem_out_device, rmatrix_d)
-                    residuals_device, chisq_device = _residuals_and_chisq(
-                        dn_b, dn_reg_device, ed_b, nf_dev
-                    )
-                _range_pop()
+                    _range_pop()
 
-                _range_push("DEVICE_TO_HOST")
-                if not streams_enabled:
-                    # Synchronous path (original behavior)
-                    dem_batch_host = cp.asnumpy(dem_out_device[:, :nt_dev])
-                    dn_reg_batch_host = cp.asnumpy(dn_reg_device)
-                    chisq_batch_host = cp.asnumpy(chisq_device)
-                    dem[b0:b1, :] = dem_batch_host
-                    dn_reg[b0:b1, :] = dn_reg_batch_host
-                    chisq[b0:b1] = chisq_batch_host
-                    edem[b0:b1, :] = np.abs(dem_batch_host) * 0.1
-                else:
-                    # Asynchronous D2H into pinned buffers using a
-                    # separate stream
-                    # Drain oldest pending if pool is full
-                    if len(pending) >= buf_depth:
-                        old = pending.popleft()
-                        # Wait for D2H completion then copy into
-                        # final outputs
-                        old["done_event"].synchronize()
-                        s0, s1 = old["slice"]
-                        hb = old["buffers"]
-                        # Copy pinned -> pageable outputs on CPU
-                        # (overlaps with next GPU compute)
-                        dem[s0:s1, :] = hb["dem"][: (s1 - s0), :]
-                        dn_reg[s0:s1, :] = hb["dnreg"][: (s1 - s0), :]
-                        chisq[s0:s1] = hb["chi"][: (s1 - s0)]
-                        edem[s0:s1, :] = (
-                            np.abs(hb["dem"][: (s1 - s0), :]) * 0.1
-                        )
-                    buf = pinned_pool[(b0 // max(1, cur_batch)) % buf_depth]
-                    # Ensure pinned views match current batch length
-                    dem_view = buf["dem"][:cur_batch, :nt_dev]
-                    dnreg_view = buf["dnreg"][:cur_batch, :nf_dev]
-                    chi_view = buf["chi"][:cur_batch]
+                    _range_push("DEVICE_TO_HOST")
+                    if not streams_enabled:
+                        # Synchronous path (original behavior)
+                        dem_batch_host = cp.asnumpy(dem_out_device[:, :nt_dev])
+                        dn_reg_batch_host = cp.asnumpy(dn_reg_device)
+                        chisq_batch_host = cp.asnumpy(chisq_device)
+                        dem[b0:b1, :] = dem_batch_host
+                        dn_reg[b0:b1, :] = dn_reg_batch_host
+                        chisq[b0:b1] = chisq_batch_host
+                        edem[b0:b1, :] = np.abs(dem_batch_host) * 0.1
+                    else:
+                        # Asynchronous D2H into pinned buffers using a
+                        # separate stream
+                        # Drain oldest pending if pool is full
+                        if len(pending) >= buf_depth:
+                            old = pending.popleft()
+                            # Wait for D2H completion then copy into
+                            # final outputs
+                            old["done_event"].synchronize()
+                            s0, s1 = old["slice"]
+                            hb = old["buffers"]
+                            # Copy pinned -> pageable outputs on CPU
+                            # (overlaps with next GPU compute)
+                            dem[s0:s1, :] = hb["dem"][: (s1 - s0), :]
+                            dn_reg[s0:s1, :] = hb["dnreg"][: (s1 - s0), :]
+                            chisq[s0:s1] = hb["chi"][: (s1 - s0)]
+                            edem[s0:s1, :] = (
+                                np.abs(hb["dem"][: (s1 - s0), :]) * 0.1
+                            )
+                        buf = pinned_pool[
+                            (b0 // max(1, cur_batch)) % buf_depth
+                        ]
+                        # Ensure pinned views match current batch length
+                        dem_view = buf["dem"][:cur_batch, :nt_dev]
+                        dnreg_view = buf["dnreg"][:cur_batch, :nf_dev]
+                        chi_view = buf["chi"][:cur_batch]
 
                     # Schedule async copies on copy_stream after
                     # compute_stream completes
@@ -898,10 +933,10 @@ def demmap_pos(
                             "dev_chi": chisq_device,
                         }
                     )
-                _range_pop()
+                    _range_pop()
 
-                b0 = b1
-                batch_size = initial_batch
+                    b0 = b1
+                    batch_size = initial_batch
             except Exception as e:
                 log = logging.getLogger(__name__)
                 log.exception("GPU batch %d:%d failed: %s", b0, b1, e)

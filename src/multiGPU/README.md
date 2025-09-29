@@ -125,7 +125,7 @@ CLI arguments (from `main.py`)
 - `--max-samples <N>`: Optional cap for pixels per file (quick sampling when flattening `bands`).
 
 Outputs
-- Aggregated per-file output saved by rank 0 to `src/multiGPU/results_Test/aggregate/dem_all_<input>.npz` (toggle compression with `MULTIGPU_SAVE_COMPRESSED=1`).
+- Aggregated per-file output saved by rank 0 to `data/results_multiGPU/dem_all_<input>.npz` (toggle compression with `MULTIGPU_SAVE_COMPRESSED=1`).
 
 Operational environment variables (selected)
 - GPU kernel controls (see `gpu_kernels.py`):
@@ -154,7 +154,29 @@ CuPy and memory pools
 
 Profiling and visibility
 - Set `MULTIGPU_NVTX=1` for NVTX ranges (works with Nsight Systems/Compute).
-- Enable `PROFILE=1` in the Slurm script to run under `nsys` inside the container. Traces are written to `src/multiGPU/results_Test/nsys/` and converted to `.nsys-rep` after the run.
+- Enable `PROFILE=1` in the Slurm script to run under `nsys` inside the container. Traces are written to `data/results_multiGPU/nsys/` and converted to `.nsys-rep` after the run.
+
+NVTX legend
+-----------
+Enable with `MULTIGPU_NVTX=1`. You’ll see the following ranges in Nsight:
+- GPU kernel phases (colors shown when Python-level NVTX is active):
+  - `DEM_SOLVE_INIT` — 0x455A64 (setup: device copies, matrices, batch size)
+  - `STREAMS_INIT` — 0x00796B (create compute/copy streams)
+  - `PINNED_POOL_INIT` — 0x303F9F (allocate pinned host buffers)
+  - `BATCH[b0:b1)` — 0xFF6F00 (per-batch envelope) containing:
+    - `BATCH_PREP` (batch slicing, response prep)
+    - `SVD` (batched rectangular SVD)
+    - `LAMBDA_SELECT` (per-sample regularization search)
+    - `RECONSTRUCTION_CALC` (DEM reconstruction + predictions)
+    - `DEVICE_TO_HOST` (D2H copies; may be async when streams enabled)
+- MPI collectives (appear around data distribution/aggregation):
+  - `MPI.Scatterv`
+  - `MPI.Gatherv`
+  - `MPI.Barrier`
+
+Notes
+- If the `nvtx` Python package isn’t present, tags are no-ops; Nsight CUDA-level tags may still appear when supported by CuPy.
+- Colors are applied to the top-level Python NVTX ranges listed above; inner CUDA ranges use default colors.
 
 Binding and locality
 - The launcher uses `--cpu-bind=cores` and `--gpu-bind=closest` with `--distribution=block:block`, which works well for 1 rank/GPU on a single node. On multi-node runs, ensure network fabrics are configured (UCX/NCCL) and consider IB vs. SHM path selection.

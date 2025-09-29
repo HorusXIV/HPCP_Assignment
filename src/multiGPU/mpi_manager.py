@@ -14,10 +14,6 @@ try:
 except Exception:
     MPI = None
 
-# Try to import cupy at module import time so helper functions can
-# reference `cp` without causing a NameError. If CuPy is not
-# available `cp` will be None and callers can call `_require_cupy()`
-# to raise a helpful ImportError.
 try:
     import cupy as cp  # type: ignore
 except Exception:
@@ -139,11 +135,20 @@ def scatterv_array(comm, array, counts, dtype=None):
     recvbuf_bytes = recvbuf.view(_np.uint8)
 
     # use MPI.BYTE so counts are in bytes and avoid mismatched datatypes
-    comm.Scatterv(
-        [sendbuf_bytes, sendcounts_bytes, displs_bytes, MPI.BYTE],
-        recvbuf_bytes,
-        root=0,
-    )
+    try:
+        from src.common.nvtx import nvtx_range  # lazy import
+    except Exception:
+        from contextlib import contextmanager as _cm
+
+        @_cm
+        def nvtx_range(_m):  # type: ignore
+            yield
+    with nvtx_range("MPI.Scatterv"):
+        comm.Scatterv(
+            [sendbuf_bytes, sendcounts_bytes, displs_bytes, MPI.BYTE],
+            recvbuf_bytes,
+            root=0,
+        )
 
     return recvbuf.reshape(local_rows, cols)
 
@@ -183,11 +188,20 @@ def gatherv_array(comm, local_array, counts, root=0):
     sendbuf_bytes = sendbuf.view(_np.uint8)
     recvbuf_bytes = recvbuf.view(_np.uint8) if recvbuf is not None else None
 
-    comm.Gatherv(
-        sendbuf_bytes,
-        [recvbuf_bytes, sendcounts_bytes, displs_bytes, MPI.BYTE],
-        root=root,
-    )
+    try:
+        from src.common.nvtx import nvtx_range  # lazy import
+    except Exception:
+        from contextlib import contextmanager as _cm
+
+        @_cm
+        def nvtx_range(_m):  # type: ignore
+            yield
+    with nvtx_range("MPI.Gatherv"):
+        comm.Gatherv(
+            sendbuf_bytes,
+            [recvbuf_bytes, sendcounts_bytes, displs_bytes, MPI.BYTE],
+            root=root,
+        )
 
     if rank == root:
         return recvbuf.reshape(sum(counts), cols)
@@ -290,4 +304,13 @@ def barrier(comm):
     """Synchronize all ranks if MPI is available."""
     if comm is None:
         return
-    comm.Barrier()
+    try:
+        from src.common.nvtx import nvtx_range  # lazy import
+    except Exception:
+        from contextlib import contextmanager as _cm
+
+        @_cm
+        def nvtx_range(_m):  # type: ignore
+            yield
+    with nvtx_range("MPI.Barrier"):
+        comm.Barrier()
