@@ -105,6 +105,36 @@ Entrypoint options
      - `MULTIGPU_STREAMS=1` (async D2H overlap; default on)
      - `MULTIGPU_BATCH_SIZE=<N>` (override adaptive batch; 0 = auto)
 
+Environment toggles (complete)
+------------------------------
+These variables can be exported before `sbatch` or passed via `--export` to `hpc/slurm_run_multiGPU.sh`.
+
+- Job/entry selection
+  - `ENTRY` (str): Python module to run (default: `src.multiGPU.main`).
+  - `INPUT_DIR` (path): Folder with `.npz` inputs (default: `data/np32`).
+  - `LOG_ROOT` (path): Root for rank logs and Nsight traces (default: `src/multiGPU/logs`).
+
+- Multi-GPU runtime (code-level)
+  - `MULTIGPU_BATCH_SIZE` (int): 0 = auto (adaptive by free mem). >0 forces a fixed batch size.
+  - `MULTIGPU_NVTX` (0/1): Enable Python-level NVTX ranges (requires `poetry install --with profiling`).
+  - `MULTIGPU_STREAMS` (0/1): Enable CUDA streams + pinned host buffers for async D2H overlap (default 1).
+  - `MULTIGPU_STREAMS_DEPTH` (int): Pinned ring buffer depth for async copies (default 2; 2–3 typical).
+  - `MULTIGPU_NO_FUSE` (0/1): Disable `cp.fuse()` wrappers in kernels (debug/determinism; default 0).
+  - `MULTIGPU_VERBOSE` (0/1): Extra info logs in kernel paths (default 0).
+  - `MULTIGPU_PREEMPT` (0/1): Register preemption signal handlers (best-effort checkpoint hook; default 0).
+  - `MULTIGPU_SAVE_COMPRESSED` (0/1): Save aggregated outputs with compression (default 0 = plain `.npz`).
+  - Logging controls: `MULTIGPU_LOG_LEVEL` (e.g., `INFO`), `MULTIGPU_QUIET` (1 to suppress per-rank files at WARNING+), `MULTIGPU_RANK_FILES` (1 to force per-rank logs).
+
+- Profiling (Nsight Systems via Slurm script)
+  - `PROFILE` (0/1): Enable `nsys profile` in the container.
+  - `NSYS_OPTS` (csv): Trace domains (default `cuda,nvtx,osrt,cublas,cusolver`).
+  - `NSYS_OUT_DIR_HOST` / `NSYS_TMP_DIR_HOST`: Host output and temp directories for Nsight files.
+
+- Communication/NCCL/UCX (Slurm script)
+  - `UCX_TLS`, `UCX_NET_DEVICES`: UCX transport selection.
+  - `NCCL_DEBUG`, `NCCL_P2P_LEVEL`, `NCCL_*`: NCCL tuning variables (defaults are safe).
+  - `CUDA_DEVICE_ORDER=PCI_BUS_ID`: Stable PCI ordering.
+
 2) Manual run (single node, already on a GPU host)
    - Poetry, local filesystem:
      ```pwsh
