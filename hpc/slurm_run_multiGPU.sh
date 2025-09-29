@@ -1,17 +1,18 @@
 #!/bin/bash -l
-#SBATCH --job-name=HPCP_MultiGPU_OPT
+#SBATCH --job-name=HPCP_MultiGPU
 #SBATCH --partition=performance
 #SBATCH --time=24:00:00
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=4            # 1 rank per GPU
-#SBATCH --gpus-per-task=1
-#SBATCH --cpus-per-task=4
-#SBATCH --hint=nomultithread
-#SBATCH --mem=64G
-#SBATCH --exclusive
-#SBATCH --signal=USR1@60
-#SBATCH --output=src/multiGPU/results_Test/logs/opt-%j.out
-#SBATCH --error=src/multiGPU/results_Test/logs/opt-%j.err
+#SBATCH --nodes=1                 # adjust as needed   
+#SBATCH --ntasks-per-node=4       # depend on results / nodes
+#SBATCH --gpus-per-task=1         # 1 GPU per MPI rank
+#SBATCH --cpus-per-task=3         # Enough to keep GPUs fed
+#SBATCH --hint=nomultithread      # disable hyperthreading
+#SBATCH --mem=32G                 # rather big memory for large images
+#SBATCH --signal=USR1@60          # preemptive signal for cleanup
+#SBATCH --output=src/multiGPU/logs/opt-%j.out
+#SBATCH --error=src/multiGPU/logs/opt-%j.err
+
+# could add #SBATCH --exclusive
 
 set -euo pipefail
 
@@ -21,7 +22,7 @@ IMAGE="${IMAGE:-$REPO_DIR/containers/python_poetry.sif}"
 ENTRY="${ENTRY:-src.multiGPU.main}"
 INPUT_DIR="${INPUT_DIR:-data/np32}"
 MAX_SAMPLES="${MAX_SAMPLES:-100000}"
-LOG_ROOT="${LOG_ROOT:-$REPO_DIR/src/multiGPU/results_Test}"
+LOG_ROOT="${LOG_ROOT:-$REPO_DIR/src/multiGPU/logs}"
 
 PROFILE="${PROFILE:-0}"              # 1 = enable Nsight Systems (nsys)
 NSYS_OPTS="${NSYS_OPTS:-cuda,nvtx,osrt,cublas,cusolver}"
@@ -38,7 +39,7 @@ NSYS_OUT_DIR_CTR="/workspace${NSYS_OUT_DIR_HOST#$REPO_DIR}"
 NSYS_TMP_DIR_CTR="/workspace${NSYS_TMP_DIR_HOST#$REPO_DIR}"
 
 cd "$REPO_DIR"
-mkdir -p "$LOG_ROOT/logs"
+mkdir -p "$LOG_ROOT/rank_logs"
 
 export MULTIGPU_BATCH_SIZE="${MULTIGPU_BATCH_SIZE:-0}"  # 0=auto, >0=override
 export MULTIGPU_STABLE_PINV="${MULTIGPU_STABLE_PINV:-1}"

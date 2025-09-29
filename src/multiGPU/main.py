@@ -61,12 +61,12 @@ def main():
         comm, rank, size = mmpi.init_mpi()
 
     # Results root (single aggregate folder, no per-rank files)
-    results_root = "src/multiGPU/results_Test"
+    results_root = "data/results_multiGPU"
+    log_root = 'src/multiGPU/logs'
     if rank == 0:
         os.makedirs(results_root, exist_ok=True)
-
     # Logging once
-    _ = mlog.setup_logging(results_root, rank=rank, size=size)
+    _ = mlog.setup_logging(log_root, rank=rank, size=size)
     log = logging.getLogger(__name__)
     log.info(
         "Starting rank %d/%d; results dir: %s",
@@ -87,14 +87,14 @@ def main():
         str(gpu_assigned),
     )
 
-    # Optional preemption handling (enable via MULTIGPU_PREEMPT=1)
+    # Preemption handling (enable via MULTIGPU_PREEMPT=1)
     if os.environ.get("MULTIGPU_PREEMPT", "0") == "1":
         try:
             from . import preempt as _preempt
 
             def _on_preempt_save():
                 # Minimal best-effort marker; production: save real state
-                mark_dir = os.path.join(results_root, "logs")
+                mark_dir = os.path.join(log_root, "logs")
                 os.makedirs(mark_dir, exist_ok=True)
                 mark = os.path.join(mark_dir, f"preempt_rank{rank:03d}.txt")
                 with open(mark, "a", encoding="utf-8") as f:
@@ -132,11 +132,12 @@ def main():
             all_inputs = sorted(glob.glob(pattern))
 
     if rank == 0:
-        print(
+        log.info(
             "Processing %d input files across %d ranks" % (
                 len(all_inputs),
-                size)
-                )
+                size),
+            extra={"general": True}
+            )
 
     # Iterate inputs: rank 0 loads/scatters; all ranks compute/gather
     for input_path in all_inputs:
@@ -303,7 +304,7 @@ def main():
                         f"Computed total DEMs: {dem_all.shape[0]}",
                         extra={"general": True}
                         )
-                    out_dir = os.path.join(results_root, "aggregate")
+                    out_dir = results_root
                     os.makedirs(out_dir, exist_ok=True)
                     inbase = os.path.splitext(os.path.basename(input_path))[0]
                     final_path = os.path.join(out_dir, f"dem_all_{inbase}.npz")

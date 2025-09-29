@@ -114,7 +114,10 @@ def setup_logging(
     )
     want_rank_files = os.environ.get("MULTIGPU_RANK_FILES", "0") == "1"
     if (not quiet_mode) or want_rank_files:
-        per_rank_log = os.path.join(results_dir, "logs", f"rank{rank:03d}.log")
+        per_rank_log = os.path.join(
+            results_dir, "rank_logs",
+            f"rank{rank:03d}.log"
+            )
         os.makedirs(os.path.dirname(per_rank_log), exist_ok=True)
         fh_rank = logging.FileHandler(per_rank_log, mode="a")
         fh_rank.setLevel(_lvl)
