@@ -6,7 +6,9 @@ single-file and rank-sharded checkpoints for MPI/distributed runs.
 Usage:
     from src.multiGPU.checkpoint import CheckpointManager
 
-    ck = CheckpointManager(outdir="/scratch/you/checkpoints", keep=5, comm=comm, rank=rank)
+    ck = CheckpointManager(
+        outdir="/scratch/you/checkpoints", keep=5, comm=comm, rank=rank
+    )
     ck.save({'step': step, 'model': model_state_dict, 'opt': opt_state_dict})
 
 The manager writes a temp file and renames it into place atomically so that
@@ -58,17 +60,25 @@ class CheckpointManager:
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._lock = threading.Lock()
         self.comm = (
-            comm if comm is not None else (MPI.COMM_WORLD if MPI is not None else None)
+            comm if comm is not None else (
+                MPI.COMM_WORLD if MPI is not None else None
+                )
         )
         if rank is None:
             try:
-                self.rank = self.comm.Get_rank() if self.comm is not None else 0
+                self.rank = (
+                    self.comm.Get_rank() if self.comm is not None else 0
+                )
             except Exception:
                 self.rank = 0
         else:
             self.rank = rank
 
-    def _filename(self, step: Optional[int] = None, rank: Optional[int] = None) -> str:
+    def _filename(
+            self,
+            step: Optional[int] = None,
+            rank: Optional[int] = None
+            ) -> str:
         """Construct a checkpoint filename.
 
         Args:
@@ -116,7 +126,8 @@ class CheckpointManager:
             # atomic write via tmp -> rename
             try:
                 with open(tmppath, "wb") as f:
-                    # use pickle for general python objects; consumer must use pickle.load
+                    # use pickle for general python objects;
+                    # consumer must use pickle.load
                     pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
                 os.replace(tmppath, outpath)
                 self._prune()
@@ -172,7 +183,7 @@ class CheckpointManager:
         files = self.list_checkpoints()
         if len(files) <= self.keep:
             return
-        old = files[self.keep :]
+        old = files[self.keep:]
         for p in old:
             try:
                 os.remove(p)
@@ -183,7 +194,11 @@ class CheckpointManager:
 def example_usage():
     # Demonstration only; do not import MPI-heavy code in module import path
     ck = CheckpointManager(outdir="./checkpoints", keep=3)
-    fake_state = {"step": 10, "model": {"w": [1, 2, 3]}, "optimizer": {"lr": 1e-3}}
+    fake_state = {
+        "step": 10,
+        "model": {"w": [1, 2, 3]},
+        "optimizer": {"lr": 1e-3},
+    }
     path = ck.save(fake_state, step=10, async_write=False)
     print("Saved:", path)
 

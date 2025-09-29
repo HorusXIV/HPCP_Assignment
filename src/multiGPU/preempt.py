@@ -44,20 +44,27 @@ def register_preempt_handlers(
             a small cross-platform set.
     """
     if signals is None:
-        # common scheduler signals: SIGTERM, SIGINT; SLURM may use SIGUSR1 for preemption
+        # common scheduler signals: SIGTERM, SIGINT;
+        # SLURM may use SIGUSR1 for preemption
         signals = [signal.SIGTERM, signal.SIGINT]
         if hasattr(signal, "SIGUSR1"):
             signals.append(signal.SIGUSR1)
 
     def _handler(signum, frame):
         name = (
-            signal.Signals(signum).name if hasattr(signal, "Signals") else str(signum)
+            signal.Signals(signum).name
+            if hasattr(signal, "Signals")
+            else str(signum)
         )
         print(
-            f"[preempt] Received signal {signum} ({name}), running checkpoint callback...",
+            (
+                f"[preempt] Received signal {signum} ({name}), "
+                "running checkpoint callback..."
+            ),
             file=sys.stderr,
         )
-        # call callback in a separate thread to avoid signal handler restrictions
+        # call callback in a separate thread to avoid
+        # signal handler restrictions
         t = threading.Thread(target=_call_callback, args=(callback,))
         t.start()
         t.join(timeout=30.0)

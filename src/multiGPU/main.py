@@ -68,7 +68,12 @@ def main():
     # Logging once
     _ = mlog.setup_logging(results_root, rank=rank, size=size)
     log = logging.getLogger(__name__)
-    log.info("Starting rank %d/%d; results dir: %s", rank, size - 1, results_root)
+    log.info(
+        "Starting rank %d/%d; results dir: %s",
+        rank,
+        size - 1,
+        results_root
+    )
 
     # Map rank to GPU based on node-local rank
     with nvtx_range("RANK_GPU_BIND", color=0x009688):
@@ -98,12 +103,16 @@ def main():
             _preempt.register_preempt_handlers(_on_preempt_save, comm=comm)
             log.info("Preemption handlers registered (rank %d)", rank)
         except Exception:
-            log.warning("Failed to register preemption handlers", exc_info=True)
+            log.warning("Failed to register preemption handlers",
+                        exc_info=True
+                        )
 
     # Inputs must be provided
     if not args.input_dir:
         if rank == 0:
-            raise RuntimeError("Must specify --input-dir to process input files")
+            raise RuntimeError(
+                "Must specify --input-dir to process input files"
+                )
         return
 
     # Rank 0 enumerates inputs; broadcast list
@@ -123,7 +132,11 @@ def main():
             all_inputs = sorted(glob.glob(pattern))
 
     if rank == 0:
-        print("Processing %d input files across %d ranks" % (len(all_inputs), size))
+        print(
+            "Processing %d input files across %d ranks" % (
+                len(all_inputs),
+                size)
+                )
 
     # Iterate inputs: rank 0 loads/scatters; all ranks compute/gather
     for input_path in all_inputs:
@@ -131,7 +144,8 @@ def main():
         with nvtx_range(file_label, color=0xFF9800):
             if rank == 0:
                 log.info(
-                    f"Starting processing input {input_path}", extra={"general": True}
+                    f"Starting processing input {input_path}",
+                    extra={"general": True}
                 )
             try:
                 # Prepare data on rank 0
@@ -146,7 +160,10 @@ def main():
                             bands = data["bands"]
                             if bands.ndim != 3:
                                 raise RuntimeError(
-                                    "Unexpected `bands` shape; expected (nf, ny, nx)"
+                                    (
+                                        "Unexpected `bands` shape; "
+                                        "expected (nf, ny, nx)"
+                                    )
                                 )
                             nf, ny, nx = bands.shape
                             n_pixels = ny * nx
@@ -156,7 +173,10 @@ def main():
                                 and n_pixels > args.max_samples
                             ):
                                 idx = np.linspace(
-                                    0, n_pixels - 1, num=args.max_samples, dtype=int
+                                    0,
+                                    n_pixels - 1,
+                                    num=args.max_samples,
+                                    dtype=int
                                 )
                                 dn2d = bands_flat[:, idx].T
                             else:
@@ -169,7 +189,10 @@ def main():
                                 edn2d = mio.ensure_2d_dn(arrays[1])
                             else:
                                 raise RuntimeError(
-                                    "Input file missing required dn and edn arrays"
+                                    (
+                                        "Input file missing required"
+                                        "dn and edn arrays"
+                                    )
                                 )
                     else:
                         dn2d = mio.ensure_2d_dn(dn)
@@ -180,12 +203,16 @@ def main():
                             edn2d = np.repeat(edn2d, dn2d.shape[0], axis=0)
                         else:
                             raise RuntimeError(
-                                "edn shape does not match dn and cannot be broadcast"
+                                (
+                                    "edn shape does not match"
+                                    "dn and cannot be broadcast"
+                                )
                             )
 
                     n_samples = int(dn2d.shape[0])
                     counts = [
-                        n_samples // size + (1 if i < (n_samples % size) else 0)
+                        n_samples // size
+                        + (1 if i < (n_samples % size) else 0)
                         for i in range(size)
                     ]
                     dn_dtype_name = str(dn2d.dtype)
@@ -207,11 +234,15 @@ def main():
                         edn_dtype = np.dtype(edn_dtype_name)
                     with nvtx_range("SCATTER_DN", color=0x43A047):
                         local_dn = mmpi.scatterv_array(
-                            comm, dn2d if rank == 0 else None, counts, dtype=dn_dtype
+                            comm,
+                            dn2d if rank == 0 else None,
+                            counts, dtype=dn_dtype
                         )
                     with nvtx_range("SCATTER_EDN", color=0x2E7D32):
                         local_edn = mmpi.scatterv_array(
-                            comm, edn2d if rank == 0 else None, counts, dtype=edn_dtype
+                            comm,
+                            edn2d if rank == 0 else None, counts,
+                            dtype=edn_dtype
                         )
                 else:
                     # Serial path
@@ -229,38 +260,55 @@ def main():
                 # Ensure CuPy is present and a GPU is assigned
                 mmpi._require_cupy()
                 if gpu_assigned is None or gpu_assigned < 0:
-                    raise RuntimeError("No GPU assigned for multiGPU execution")
+                    raise RuntimeError(
+                        "No GPU assigned for multiGPU execution"
+                        )
 
                 # Compute once; internal batching happens inside demmap_pos
                 with nvtx_range("GPU_COMPUTE", color=0xE65100):
-                    dem_local, edem_local, elogt_local, chisq_local, dn_reg_local = (
-                        gpu_kernels.demmap_pos(
-                            local_dn, local_edn, tresp, logt, dlogt, np.ones(nf)
-                        )
+                    (
+                        dem_local,
+                        edem_local,
+                        elogt_local,
+                        chisq_local,
+                        dn_reg_local,
+                    ) = gpu_kernels.demmap_pos(
+                        local_dn, local_edn, tresp, logt, dlogt, np.ones(nf)
                     )
 
                 # Gather results on root
                 if comm is not None:
                     with nvtx_range("GATHER_DEM", color=0x6D4C41):
-                        dem_all = mmpi.gatherv_array(comm, dem_local, counts, root=0)
+                        dem_all = mmpi.gatherv_array(
+                            comm,
+                            dem_local,
+                            counts,
+                            root=0
+                        )
                     with nvtx_range("POST_GATHER_BARRIER", color=0x5D4037):
                         try:
                             mmpi.barrier(comm)
                         except Exception as e:
                             log.exception(
-                                "Rank %d: MPI barrier failed after gather: %s", rank, e
+                                "Rank %d: MPI barrier failed after gather: %s",
+                                rank,
+                                e
                             )
                 else:
                     dem_all = dem_local
 
                 # Save on root only
                 if rank == 0 and dem_all is not None:
-                    print(f"Computed total DEMs: {dem_all.shape[0]}")
+                    log.info(
+                        f"Computed total DEMs: {dem_all.shape[0]}",
+                        extra={"general": True}
+                        )
                     out_dir = os.path.join(results_root, "aggregate")
                     os.makedirs(out_dir, exist_ok=True)
                     inbase = os.path.splitext(os.path.basename(input_path))[0]
                     final_path = os.path.join(out_dir, f"dem_all_{inbase}.npz")
-                    compress = os.environ.get("MULTIGPU_SAVE_COMPRESSED", "0") == "1"
+                    comp_e = os.environ.get("MULTIGPU_SAVE_COMPRESSED", "0")
+                    compress = comp_e == "1"
                     t0 = time.perf_counter()
                     with nvtx_range("SAVE_RESULTS", color=0x795548):
                         if compress:
@@ -269,16 +317,21 @@ def main():
                             np.savez(final_path, dem_all=dem_all)
                     dt = time.perf_counter() - t0
                     log.info(
-                        "Saved aggregated DEMs to %s (shape=%s, compressed=%s) in %.2fs",
+                        (
+                            "Saved aggregated DEMs to %s (shape=%s, "
+                            "compressed=%s) in %.2fs"
+                        ),
                         final_path,
                         tuple(dem_all.shape),
                         str(compress),
                         dt,
                     )
-
-            except Exception:
+            except Exception as e:
                 log.exception(
-                    "Rank %d: exception while processing %s", rank, input_path
+                    "Rank %d: exception while processing %s: %s",
+                    rank,
+                    input_path,
+                    e
                 )
                 raise
 
@@ -288,7 +341,9 @@ def main():
             try:
                 mmpi.barrier(comm)
             except Exception as e:
-                logging.getLogger(__name__).warning("Final MPI barrier failed: %s", e)
+                logging.getLogger(__name__).warning(
+                    "Final MPI barrier failed: %s", e
+                )
 
     # Clean shutdown of logging
     with nvtx_range("SHUTDOWN", color=0x9E9E9E):

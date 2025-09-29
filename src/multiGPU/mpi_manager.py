@@ -254,17 +254,6 @@ def set_device_for_local_rank(comm, prefer_visible=True):
     except Exception:
         return -1
 
-    # best-effort numba device select
-    try:
-        from numba import cuda as _ncuda
-
-        try:
-            _ncuda.select_device(0)
-        except Exception:
-            pass
-    except Exception:
-        pass
-
     return int(dev_choice)
 
 

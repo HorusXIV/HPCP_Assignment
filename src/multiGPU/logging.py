@@ -40,7 +40,10 @@ class ConsoleFilter(logging.Filter):
     ``extra={"general": True}``.
     """
 
-    def filter(self, record: logging.LogRecord) -> bool:  # type: ignore[override]
+    def filter(
+        self,
+        record: logging.LogRecord
+    ) -> bool:  # type: ignore[override]
         if record.levelno >= logging.WARNING:
             return True
         return bool(getattr(record, "general", False))
@@ -48,13 +51,19 @@ class ConsoleFilter(logging.Filter):
 
 def _make_formatter():
     """Return a formatter that tolerates missing ``rank`` attribute."""
-    fmt = "%(asctime)s - rank=%(rank)s - %(levelname)s - %(name)s - %(message)s"
+    fmt = (
+        "%(asctime)s - rank=%(rank)s - %(levelname)s - "
+        "%(name)s - %(message)s"
+    )
 
     # Use a SafeFormatter that provides a default for missing fields like
     # `rank`.
 
     class SafeFormatter(logging.Formatter):
-        def format(self, record: logging.LogRecord) -> str:  # type: ignore[override]
+        def format(
+                self,
+                record: logging.LogRecord
+        ) -> str:  # type: ignore[override]
             if not hasattr(record, "rank"):
                 # attach a safe default if missing
                 setattr(record, "rank", "-")
@@ -63,7 +72,12 @@ def _make_formatter():
     return SafeFormatter(fmt)
 
 
-def setup_logging(results_dir: str, rank: int = 0, size: int = 1, console: bool = True):
+def setup_logging(
+        results_dir: str,
+        rank: int = 0,
+        size: int = 1,
+        console: bool = True
+        ) -> logging.Logger:
     """Initialize per-rank logging and optional rank-0 console output.
 
     Args:
@@ -95,7 +109,8 @@ def setup_logging(results_dir: str, rank: int = 0, size: int = 1, console: bool 
 
     # Per-rank file handler (disabled in quiet mode unless forced)
     quiet_mode = (
-        _lvl >= logging.WARNING and os.environ.get("MULTIGPU_QUIET", "1") == "1"
+        _lvl >= logging.WARNING
+        and os.environ.get("MULTIGPU_QUIET", "1") == "1"
     )
     want_rank_files = os.environ.get("MULTIGPU_RANK_FILES", "0") == "1"
     if (not quiet_mode) or want_rank_files:
