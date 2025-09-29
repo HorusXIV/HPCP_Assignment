@@ -1,14 +1,22 @@
-"""Entry point for launching multi-GPU DEM computations with explicit MPI.
+"""Launch multi-GPU DEM computations with explicit MPI orchestration.
 
-This script demonstrates how to initialize MPI, bind GPUs to ranks and run a
-GPU-accelerated kernel over input data. It intentionally keeps dependencies
-light so it can be executed on development machines as a serial script.
+High-level flow
+1) Initialize/broadcast MPI state and map ranks to GPUs.
+2) Rank 0 enumerates inputs and broadcasts the worklist.
+3) For each input, rank 0 loads and scatters rows to all ranks.
+4) Ranks call the GPU kernel once (internal batching), gather DEMs.
+5) Rank 0 saves a single aggregated output per input.
 """
+
 from __future__ import annotations
 
 import argparse
 import logging
 import numpy as np
+import os
+import glob
+import time
+from src.common.nvtx import nvtx_range
 from . import io as mio
 from . import mpi_manager as mmpi
 from . import gpu_kernels
@@ -16,6 +24,11 @@ from . import logging as mlog
 
 
 def parse_args():
+    """Parse CLI arguments for the multi-GPU entry point.
+
+    Returns:
+        argparse.Namespace containing the parsed options.
+    """
     p = argparse.ArgumentParser()
     p.add_argument(
         "--input-dir",
@@ -29,36 +42,43 @@ def parse_args():
         "--max-samples",
         type=int,
         default=None,
-        help=(
-            "maximum number of spatial samples (pixels) to process"
-        ),
+        help=("maximum number of spatial samples (pixels) to process"),
     )
     return p.parse_args()
 
 
 def main():
+    """Program entrypoint when executed as ``python -m src.multiGPU.main``.
+
+    Initializes MPI, logging, rank-to-GPU binding, handles I/O, and invokes
+    the GPU kernels. Errors are allowed to propagate to ensure proper Slurm
+    failure signaling.
+    """
     args = parse_args()
 
-    comm, rank, size = mmpi.init_mpi()
-    # Setup results directory structure
-    results_root = "src/multiGPU/results"
-    # Results will be written into the shared `aggregate` folder under
-    # `results_root` (no per-rank subdirectories).
+    # MPI init once
+    with nvtx_range("INIT_MPI", color=0x4CAF50):
+        comm, rank, size = mmpi.init_mpi()
+
+    # Results root (single aggregate folder, no per-rank files)
+    results_root = "data/results_multiGPU"
+    log_root = 'src/multiGPU/logs'
     if rank == 0:
-        # ensure parent exists
-        import os
-
         os.makedirs(results_root, exist_ok=True)
-
-    # Initialize logging (creates logs/ under results_root)
-    _ = mlog.setup_logging(results_root, rank=rank, size=size)
+    # Logging once
+    _ = mlog.setup_logging(log_root, rank=rank, size=size)
     log = logging.getLogger(__name__)
-    log.info(f"Starting rank {rank}/{size-1}; results dir: {results_root}")
+    log.info(
+        "Starting rank %d/%d; results dir: %s",
+        rank,
+        size - 1,
+        results_root
+    )
 
-    # Map rank to GPU and bind environment (prefer per-node local-rank mapping)
-    local_rank, local_size, node = mmpi.get_local_rank_info(comm)
-    gpu_assigned = mmpi.set_device_for_local_rank(comm)
-    # Startup banner
+    # Map rank to GPU based on node-local rank
+    with nvtx_range("RANK_GPU_BIND", color=0x009688):
+        local_rank, local_size, node = mmpi.get_local_rank_info(comm)
+        gpu_assigned = mmpi.set_device_for_local_rank(comm)
     log.info(
         "MPI size=%d, node=%s, local_size=%d, gpu_assigned=%s",
         size,
@@ -67,17 +87,36 @@ def main():
         str(gpu_assigned),
     )
 
-    # Decide input list: either single file or enumerate a directory
-    import os
-    import glob
+    # Preemption handling (enable via MULTIGPU_PREEMPT=1)
+    if os.environ.get("MULTIGPU_PREEMPT", "0") == "1":
+        try:
+            from . import preempt as _preempt
 
+            def _on_preempt_save():
+                # Minimal best-effort marker; production: save real state
+                mark_dir = os.path.join(log_root, "logs")
+                os.makedirs(mark_dir, exist_ok=True)
+                mark = os.path.join(mark_dir, f"preempt_rank{rank:03d}.txt")
+                with open(mark, "a", encoding="utf-8") as f:
+                    f.write("preempt received\n")
+
+            _preempt.register_preempt_handlers(_on_preempt_save, comm=comm)
+            log.info("Preemption handlers registered (rank %d)", rank)
+        except Exception:
+            log.warning("Failed to register preemption handlers",
+                        exc_info=True
+                        )
+
+    # Inputs must be provided
     if not args.input_dir:
         if rank == 0:
             raise RuntimeError(
                 "Must specify --input-dir to process input files"
-            )
-    else:
-        # Rank 0 enumerates files and distributes the list to all ranks
+                )
+        return
+
+    # Rank 0 enumerates inputs; broadcast list
+    with nvtx_range("ENUM_INPUTS", color=0x2196F3):
         if rank == 0:
             pattern = os.path.join(args.input_dir, "*.npz")
             all_inputs = sorted(glob.glob(pattern))
@@ -85,300 +124,231 @@ def main():
                 raise RuntimeError(f"No .npz files found in {args.input_dir}")
         else:
             all_inputs = None
-
-        # Broadcast the list of inputs to all ranks. The serial stub will get
-        # None which is handled below.
+    with nvtx_range("BCAST_INPUTS", color=0x1976D2):
         if comm is not None:
             all_inputs = comm.bcast(all_inputs, root=0)
         else:
-            # non-MPI fallback: enumerate locally
             pattern = os.path.join(args.input_dir, "*.npz")
             all_inputs = sorted(glob.glob(pattern))
 
-        # We will iterate all inputs on every rank but let rank 0 load the
-        # data and scatter rows to workers. This guarantees every MPI
-        # collective (Scatterv/Gatherv) is invoked by all ranks and that
-        # rank 0 can reliably save a full `dem_all` file for each input.
-        n_files = len(all_inputs)
-        if rank == 0:
-            print(
-                "Processing %d input files across %d ranks" % (n_files, size)
+    if rank == 0:
+        log.info(
+            "Processing %d input files across %d ranks" % (
+                len(all_inputs),
+                size),
+            extra={"general": True}
             )
 
-    # All ranks iterate the global input list; rank 0 will load each file
-    # and participate in the scatter/gather protocol so the full result
-    # is created and saved for every input.
+    # Iterate inputs: rank 0 loads/scatters; all ranks compute/gather
     for input_path in all_inputs:
-        # Announce input start and measure elapsed time
-        log.info(f"Rank {rank}: starting processing input {input_path}")
-        try:
-            # Rank 0 loads and prepares the arrays; other ranks wait to
-            # participate in the collective scatterv. This ensures a
-            # consistent collective ordering across ranks.
+        file_label = f"PROCESS_FILE:{os.path.basename(input_path)}"
+        with nvtx_range(file_label, color=0xFF9800):
             if rank == 0:
-                data = mio.load_npz(input_path)
-
-                # Heuristics: prefer `dn`/`edn`; otherwise `bands` layout.
-                dn = data.get("dn", None)
-                edn = data.get("edn", None)
-                if dn is None:
-                    if "bands" in data:
-                        bands = data["bands"]
-                        if bands.ndim != 3:
-                            raise RuntimeError(
-                                "Unexpected `bands` shape; expected (nf, ny, nx)"
-                            )
-                        nf, ny, nx = bands.shape
-                        n_pixels = ny * nx
-                        max_samples = args.max_samples
-                        bands_flat = bands.reshape(nf, n_pixels)
-                        if max_samples is not None and n_pixels > max_samples:
-                            idx = np.linspace(
-                                0, n_pixels - 1, num=max_samples, dtype=int
-                            )
-                            dn2d = bands_flat[:, idx].T
-                        else:
-                            dn2d = bands_flat.T
-                        edn2d = np.ones((dn2d.shape[0], nf), dtype=float)
-                        dn = dn2d
-                        edn = edn2d
-                    else:
-                        arrays = [v for v in data.values()]
-                        if len(arrays) >= 2:
-                            dn, edn = arrays[0], arrays[1]
-                        else:
-                            raise RuntimeError(
-                                "Input file missing required dn and edn arrays"
-                            )
-
-                dn2d = mio.ensure_2d_dn(dn)
-                edn2d = mio.ensure_2d_dn(edn)
-                if edn2d.shape[0] != dn2d.shape[0]:
-                    if edn2d.shape[0] == 1:
-                        edn2d = np.repeat(edn2d, dn2d.shape[0], axis=0)
-                    else:
-                        raise RuntimeError(
-                            "edn shape does not match dn and cannot be broadcast"
-                        )
-
+                log.info(
+                    f"Starting processing input {input_path}",
+                    extra={"general": True}
+                )
+            try:
+                # Prepare data on rank 0
                 if rank == 0:
-                    print(
-                        "dn2d.shape=%s, edn2d.shape=%s"
-                        % (str(dn2d.shape), str(edn2d.shape))
-                    )
+                    with nvtx_range("LOAD_FILE", color=0x8E24AA):
+                        data = mio.load_npz(input_path)
+                    # Prefer dn/edn, fall back to bands
+                    dn = data.get("dn", None)
+                    edn = data.get("edn", None)
+                    if dn is None:
+                        if "bands" in data:
+                            bands = data["bands"]
+                            if bands.ndim != 3:
+                                raise RuntimeError(
+                                    (
+                                        "Unexpected `bands` shape; "
+                                        "expected (nf, ny, nx)"
+                                    )
+                                )
+                            nf, ny, nx = bands.shape
+                            n_pixels = ny * nx
+                            bands_flat = bands.reshape(nf, n_pixels)
+                            if (
+                                args.max_samples is not None
+                                and n_pixels > args.max_samples
+                            ):
+                                idx = np.linspace(
+                                    0,
+                                    n_pixels - 1,
+                                    num=args.max_samples,
+                                    dtype=int
+                                )
+                                dn2d = bands_flat[:, idx].T
+                            else:
+                                dn2d = bands_flat.T
+                            edn2d = np.ones((dn2d.shape[0], nf), dtype=float)
+                        else:
+                            arrays = [v for v in data.values()]
+                            if len(arrays) >= 2:
+                                dn2d = mio.ensure_2d_dn(arrays[0])
+                                edn2d = mio.ensure_2d_dn(arrays[1])
+                            else:
+                                raise RuntimeError(
+                                    (
+                                        "Input file missing required"
+                                        "dn and edn arrays"
+                                    )
+                                )
+                    else:
+                        dn2d = mio.ensure_2d_dn(dn)
+                        edn2d = mio.ensure_2d_dn(edn)
 
-                n_samples = dn2d.shape[0]
-                counts = [
-                    n_samples // size + (1 if i < (n_samples % size) else 0)
-                    for i in range(size)
-                ]
-            else:
-                # non-root ranks start with placeholders; they'll receive
-                # their slices via the collective scatterv call below.
-                dn2d = None
-                edn2d = None
-                n_samples = None
-                counts = None
+                    if edn2d.shape[0] != dn2d.shape[0]:
+                        if edn2d.shape[0] == 1:
+                            edn2d = np.repeat(edn2d, dn2d.shape[0], axis=0)
+                        else:
+                            raise RuntimeError(
+                                (
+                                    "edn shape does not match"
+                                    "dn and cannot be broadcast"
+                                )
+                            )
 
-            # Broadcast counts so all ranks know local sizes for this input
-            if comm is not None:
-                counts = comm.bcast(counts, root=0)
-
-                # Broadcast dtypes as strings so non-root ranks can pass a
-                # valid dtype argument to scatterv_array. Reconstruct a
-                # numpy.dtype locally on each rank.
-                if rank == 0:
+                    n_samples = int(dn2d.shape[0])
+                    counts = [
+                        n_samples // size
+                        + (1 if i < (n_samples % size) else 0)
+                        for i in range(size)
+                    ]
                     dn_dtype_name = str(dn2d.dtype)
                     edn_dtype_name = str(edn2d.dtype)
                 else:
+                    dn2d = None
+                    edn2d = None
+                    counts = None
                     dn_dtype_name = None
                     edn_dtype_name = None
-                dn_dtype_name = comm.bcast(dn_dtype_name, root=0)
-                edn_dtype_name = comm.bcast(edn_dtype_name, root=0)
-                dn_dtype = np.dtype(dn_dtype_name)
-                edn_dtype = np.dtype(edn_dtype_name)
 
-                local_dn = mmpi.scatterv_array(
-                    comm,
-                    dn2d if rank == 0 else None,
-                    counts,
-                    dtype=dn_dtype,
-                )
-                local_edn = mmpi.scatterv_array(
-                    comm,
-                    edn2d if rank == 0 else None,
-                    counts,
-                    dtype=edn_dtype,
-                )
-            else:
-                # serial fallback: local arrays are the full arrays
-                local_dn = dn2d
-                local_edn = edn2d
-                counts = [n_samples]
+                if comm is not None:
+                    with nvtx_range("BCAST_COUNTS", color=0x1565C0):
+                        counts = comm.bcast(counts, root=0)
+                    with nvtx_range("BCAST_DTYPES", color=0x0D47A1):
+                        dn_dtype_name = comm.bcast(dn_dtype_name, root=0)
+                        edn_dtype_name = comm.bcast(edn_dtype_name, root=0)
+                        dn_dtype = np.dtype(dn_dtype_name)
+                        edn_dtype = np.dtype(edn_dtype_name)
+                    with nvtx_range("SCATTER_DN", color=0x43A047):
+                        local_dn = mmpi.scatterv_array(
+                            comm,
+                            dn2d if rank == 0 else None,
+                            counts, dtype=dn_dtype
+                        )
+                    with nvtx_range("SCATTER_EDN", color=0x2E7D32):
+                        local_edn = mmpi.scatterv_array(
+                            comm,
+                            edn2d if rank == 0 else None, counts,
+                            dtype=edn_dtype
+                        )
+                else:
+                    # Serial path
+                    local_dn = dn2d
+                    local_edn = edn2d
+                    counts = [local_dn.shape[0]]
 
-            # build rmatrix like dn2dem_pos does (simple path)
-            # for demonstration use a small synthetic rmatrix based on filters
-            nf = local_dn.shape[1]
-            nt = 10
-            # create log-temperature centers and widths
-            logt = np.linspace(5.0, 7.0, nt)
-            dlogt = np.full(nt, logt[1] - logt[0])
-            tresp = np.ones((nt, nf))
+                # Build simple response matrix (nt x nf)
+                nf = local_dn.shape[1]
+                nt = 10
+                logt = np.linspace(5.0, 7.0, nt)
+                dlogt = np.full(nt, logt[1] - logt[0])
+                tresp = np.ones((nt, nf))
 
-            # Enforce CuPy presence and GPU assignment; fail loudly if missing
-            try:
-                # ensure an informative ImportError is raised via the helper
+                # Ensure CuPy is present and a GPU is assigned
                 mmpi._require_cupy()
+                if gpu_assigned is None or gpu_assigned < 0:
+                    raise RuntimeError(
+                        "No GPU assigned for multiGPU execution"
+                        )
+
+                # Compute once; internal batching happens inside demmap_pos
+                with nvtx_range("GPU_COMPUTE", color=0xE65100):
+                    (
+                        dem_local,
+                        edem_local,
+                        elogt_local,
+                        chisq_local,
+                        dn_reg_local,
+                    ) = gpu_kernels.demmap_pos(
+                        local_dn, local_edn, tresp, logt, dlogt, np.ones(nf)
+                    )
+
+                # Gather results on root
+                if comm is not None:
+                    with nvtx_range("GATHER_DEM", color=0x6D4C41):
+                        dem_all = mmpi.gatherv_array(
+                            comm,
+                            dem_local,
+                            counts,
+                            root=0
+                        )
+                    with nvtx_range("POST_GATHER_BARRIER", color=0x5D4037):
+                        try:
+                            mmpi.barrier(comm)
+                        except Exception as e:
+                            log.exception(
+                                "Rank %d: MPI barrier failed after gather: %s",
+                                rank,
+                                e
+                            )
+                else:
+                    dem_all = dem_local
+
+                # Save on root only
+                if rank == 0 and dem_all is not None:
+                    log.info(
+                        f"Computed total DEMs: {dem_all.shape[0]}",
+                        extra={"general": True}
+                        )
+                    out_dir = results_root
+                    os.makedirs(out_dir, exist_ok=True)
+                    inbase = os.path.splitext(os.path.basename(input_path))[0]
+                    final_path = os.path.join(out_dir, f"dem_all_{inbase}.npz")
+                    comp_e = os.environ.get("MULTIGPU_SAVE_COMPRESSED", "0")
+                    compress = comp_e == "1"
+                    t0 = time.perf_counter()
+                    with nvtx_range("SAVE_RESULTS", color=0x795548):
+                        if compress:
+                            np.savez_compressed(final_path, dem_all=dem_all)
+                        else:
+                            np.savez(final_path, dem_all=dem_all)
+                    dt = time.perf_counter() - t0
+                    log.info(
+                        (
+                            "Saved aggregated DEMs to %s (shape=%s, "
+                            "compressed=%s) in %.2fs"
+                        ),
+                        final_path,
+                        tuple(dem_all.shape),
+                        str(compress),
+                        dt,
+                    )
             except Exception as e:
                 log.exception(
-                    "Rank %d: CuPy requirement check failed: %s",
+                    "Rank %d: exception while processing %s: %s",
                     rank,
-                    e,
+                    input_path,
+                    e
                 )
                 raise
-            if gpu_assigned is None or gpu_assigned < 0:
-                raise RuntimeError(
-                    (
-                        "No GPU assigned for multiGPU execution; ensure "
-                        "CUDA_VISIBLE_DEVICES or N_GPUS is set and GPUs are "
-                        "available."
-                    )
+
+    # Final barrier before shutdown
+    if comm is not None:
+        with nvtx_range("FINAL_BARRIER", color=0x9E9E9E):
+            try:
+                mmpi.barrier(comm)
+            except Exception as e:
+                logging.getLogger(__name__).warning(
+                    "Final MPI barrier failed: %s", e
                 )
 
-            # process local pixels in blocks to amortize GPU setup costs
-            block = 128
-            dem_local = np.zeros((local_dn.shape[0], nt))
-            edem_local = np.zeros_like(dem_local)
-            elogt_local = np.zeros_like(dem_local)
-            chisq_local = np.zeros((local_dn.shape[0],))
-            dn_reg_local = np.zeros((local_dn.shape[0], nf))
-
-            for i in range(0, local_dn.shape[0], block):
-                i2 = min(local_dn.shape[0], i + block)
-                sub_dn = local_dn[i:i2]
-                sub_edn = local_edn[i:i2]
-                dem_b, edem_b, elogt_b, chisq_b, dnreg_b = (
-                    gpu_kernels.demmap_pos(
-                        sub_dn, sub_edn, tresp, logt, dlogt, np.ones(nf)
-                    )
-                )
-                dem_local[i:i2] = dem_b
-                edem_local[i:i2] = edem_b
-                elogt_local[i:i2] = elogt_b
-                chisq_local[i:i2] = chisq_b
-                dn_reg_local[i:i2] = dnreg_b
-
-            log.info(
-                "Rank %d: processed %d pixels on GPU %s",
-                rank,
-                local_dn.shape[0],
-                str(gpu_assigned),
-            )
-            log.info(
-                "Rank %d: finished input %s (GPU)",
-                rank,
-                input_path,
-            )
-
-            # Gather results to root for final aggregation
-            if comm is not None:
-                dem_all = mmpi.gatherv_array(comm, dem_local, counts, root=0)
-                # Ensure all ranks reach the same point before root writes file
-                try:
-                    mmpi.barrier(comm)
-                except Exception as e:
-                    # barrier failure doesn't block saving; log it
-                    log.exception(
-                        "Rank %d: MPI barrier failed after gather: %s",
-                        rank,
-                        e,
-                    )
-
-                if rank == 0:
-                    # Basic sanity check: gathered rows must equal sum(counts)
-                    expected = int(sum(counts))
-                    # If gatherv returned None or a mismatched shape, attempt
-                    # to recover by reading per-rank local files (shared FS)
-                    if dem_all is None or dem_all.shape[0] != expected:
-                        log.warning(
-                            (
-                                "Gathered DEMs missing or size-mismatched; "
-                                "attempting fallback"
-                            )
-                        )
-                        # Try reading per-rank local outputs and concatenating
-                        try:
-                            parts = []
-                            # Look for per-rank files in the aggregate folder.
-                            # Filenames: dem_local_r{rank:03d}_{inbase}.npz
-                            agg_dir = os.path.join(results_root, "aggregate")
-                            basename = os.path.basename(input_path)
-                            inbase = os.path.splitext(basename)[0]
-                            for r in range(size):
-                                pfile = os.path.join(
-                                    agg_dir,
-                                    f"dem_local_r{r:03d}_{inbase}.npz",
-                                )
-                                if not os.path.exists(pfile):
-                                    raise FileNotFoundError(
-                                        f"Missing per-rank file: {pfile}"
-                                    )
-                                with np.load(pfile) as d:
-                                    parts.append(d["dem_local"])
-                            dem_all = np.vstack(parts)
-                            if dem_all.shape[0] != expected:
-                                raise RuntimeError(
-                                    "Fallback aggregation produced %d rows; "
-                                    "expected %d"
-                                    % (dem_all.shape[0], expected)
-                                )
-                            log.info(
-                                (
-                                    "Fallback aggregation from per-rank "
-                                    "files succeeded"
-                                )
-                            )
-                        except Exception:
-                            log.exception(
-                                "Fallback aggregation failed; aborting save"
-                            )
-                            raise
-
-                    print(f"Computed total DEMs: {dem_all.shape[0]}")
-                    # Save aggregated results to root results dir (per-input)
-
-                    os.makedirs(f"{results_root}/aggregate", exist_ok=True)
-                    inbase = os.path.splitext(os.path.basename(input_path))[0]
-                    final_path = os.path.join(
-                        f"{results_root}/aggregate", f"dem_all_{inbase}.npz"
-                    )
-
-                    np.savez_compressed(final_path, dem_all=dem_all)
-
-            else:
-                print(f"Computed total DEMs: {dem_local.shape[0]}")
-                import os
-
-                os.makedirs(f"{results_root}/aggregate", exist_ok=True)
-                inbase = os.path.splitext(os.path.basename(input_path))[0]
-                final_path = os.path.join(
-                    f"{results_root}/aggregate", f"dem_all_{inbase}.npz"
-                )
-
-                np.savez_compressed(final_path, dem_all=dem_all)
-
-                log.info(f"Saved local DEMs to {final_path}")
-
-        except Exception:
-            log.exception(
-                "Rank %d: exception while processing %s",
-                rank,
-                input_path,
-            )
-            raise
-
-    # Clean shutdown of logging to ensure all records are flushed
-    mlog.shutdown_logging()
+    # Clean shutdown of logging
+    with nvtx_range("SHUTDOWN", color=0x9E9E9E):
+        mlog.shutdown_logging()
 
 
 if __name__ == "__main__":

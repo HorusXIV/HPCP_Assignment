@@ -44,13 +44,29 @@ Stage: build
 
     # Prepare package sources and add extra repositories.
     apt-get update -y
-    apt-get install -y --no-install-recommends software-properties-common
+    apt-get install -y --no-install-recommends software-properties-common ca-certificates curl gnupg
     add-apt-repository universe
     add-apt-repository multiverse
     apt-get update -y
 
+    # Detect Ubuntu release / architecture for the DevTools repo path
+    UBU_REL="$(. /etc/lsb-release; echo "${DISTRIB_RELEASE}" | tr -d .)"   # e.g. 2204
+    ARCH="$(dpkg --print-architecture)"                                     # e.g. amd64
+
+    # Import NVIDIA DevTools repo key into a keyring (avoid apt-key)
+    curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu1804/x86_64/7fa2af80.pub \
+    | gpg --dearmor -o /usr/share/keyrings/nvidia-devtools.gpg
+
+    # Register the DevTools repo (note: /devtools/ path, not /compute/)
+    echo "deb [signed-by=/usr/share/keyrings/nvidia-devtools.gpg arch=${ARCH}] \
+    https://developer.download.nvidia.com/devtools/repos/ubuntu${UBU_REL}/${ARCH}/ /" \
+    > /etc/apt/sources.list.d/nvidia-devtools.list
+
+    apt-get update -y
+
     # Install required packages including build dependencies for Python.
     apt-get install -y --no-install-recommends \
+        nsight-systems-cli \
         ca-certificates \
         curl \
         jq \

@@ -3451,6 +3451,39 @@ files = [
 ]
 
 [[package]]
+name = "nvtx"
+version = "0.2.13"
+description = "Python NVTX - Python code annotation library"
+optional = false
+python-versions = "*"
+groups = ["profiling"]
+files = [
+    {file = "nvtx-0.2.13-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:462bdcc65a12b53bfa3e7df564ddfb72092a030a923dccd1cf88c4b771ecae3f"},
+    {file = "nvtx-0.2.13-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:7874534af889ab7c2c63554c73119d193d2beb7671b551b7f43de5b97ceb5971"},
+    {file = "nvtx-0.2.13-cp310-cp310-win_amd64.whl", hash = "sha256:4f26d04b5ea5b96096941cb9a7115a73454e9e9d5c247bfcd34ec584559cf9dd"},
+    {file = "nvtx-0.2.13-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:1ad794a0c046ef268b2fb3b6812a35bb3bce5cd19207d164689943f0031ac45f"},
+    {file = "nvtx-0.2.13-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:5640ca4b8be2c19a8fc4ca8403d3c2598165ea27541940b4897138a7b0a717fe"},
+    {file = "nvtx-0.2.13-cp311-cp311-win_amd64.whl", hash = "sha256:be6d53143cb2bd44e04aecdb7f3b34b48ded96f3673ae41362239d9f54bcfe27"},
+    {file = "nvtx-0.2.13-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:3435cbbffa132f6aaba3abdb01e71a1b961a20858b4cb791883895a25b9305d6"},
+    {file = "nvtx-0.2.13-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:453d838dd1424a04303281ee57a73e2b8dca0e03039bc609a945861b8fe7d7d9"},
+    {file = "nvtx-0.2.13-cp312-cp312-win_amd64.whl", hash = "sha256:0722d743e0e41e1fb866ebe6446e0cd0d268ca8671313f8da4f8c969956b74d3"},
+    {file = "nvtx-0.2.13-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:a1561d2111c698b1b1075899ff9c3fa7ba83603fc27c2e8ef567de6bbbe85ce1"},
+    {file = "nvtx-0.2.13-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:edd7b729ed0211350258a21dd13422f59bc521de2b2fd21feb6c177af492f4e1"},
+    {file = "nvtx-0.2.13-cp313-cp313-win_amd64.whl", hash = "sha256:f0524bb71443d5a1f19a6409a9a81405fc437e53c5edfc4c44b6f4504ccf46e3"},
+    {file = "nvtx-0.2.13-cp38-cp38-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:88286e7f1bb098704b8fd58a08a1b0c0fd41843275bf23badb5e32f59e0b38b9"},
+    {file = "nvtx-0.2.13-cp38-cp38-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:3ae27d5a2049f72b53bf6c061c3c8badeb8c33758b3eb31a888cca7afbbe3114"},
+    {file = "nvtx-0.2.13-cp38-cp38-win_amd64.whl", hash = "sha256:e759bf6d97ff7a134cf290b251c4d55154a707d80131a00c043942e22caab089"},
+    {file = "nvtx-0.2.13-cp39-cp39-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:18634cffbcebd535c8e7c2cbac86a3e3313bd23975d7c3e811e063fbc0b6cb88"},
+    {file = "nvtx-0.2.13-cp39-cp39-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:9ffa37591353296c1a81130d8231c6550ba5faf2f8e2fc87b851f69446a836cf"},
+    {file = "nvtx-0.2.13-cp39-cp39-win_amd64.whl", hash = "sha256:65ba8e3d81bf34cb363042787b8e2189cda6af38749374997a36262e2219105e"},
+    {file = "nvtx-0.2.13.tar.gz", hash = "sha256:9db7ba135168e14e1f038866100bf8ed42d3e00b404e9bc7b6280ee3af828b92"},
+]
+
+[package.extras]
+docs = ["nvidia_sphinx_theme", "sphinx"]
+test = ["Cython (==3.0.11)", "pytest", "setuptools"]
+
+[[package]]
 name = "packaging"
 version = "25.0"
 description = "Core utilities for Python packages"
@@ -5558,10 +5591,7 @@ pyerfa = ">=2.0.1.1"
 python-dateutil = {version = ">=2.9.0", optional = true, markers = "extra == \"net\""}
 reproject = {version = ">=0.12.0", optional = true, markers = "extra == \"map\""}
 requests = ">=2.32.0"
-scipy = [
-    {version = ">=1.11.0", optional = true, markers = "extra == \"map\" or extra == \"image\""},
-    {version = ">=1.11.0", optional = true, markers = "extra == \"image\" or extra == \"map\""},
-]
+scipy = {version = ">=1.11.0", optional = true, markers = "extra == \"image\" or extra == \"map\""}
 tqdm = {version = ">=4.66.0", optional = true, markers = "extra == \"net\""}
 zeep = {version = ">=4.3.0", optional = true, markers = "extra == \"net\""}
 
@@ -6100,4 +6130,4 @@ files = [
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12"
-content-hash = "b07532e67ab1acec7488ad5be21076620a8102e2d477fcaa7be44e37457e8b51"
+content-hash = "d232fc55aaffd8034808bef3d3fa3613ce6c411cccb1ec041022d13b043df71b"

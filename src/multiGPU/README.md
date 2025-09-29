@@ -28,156 +28,207 @@ nvidia-smi
 Activate the Poetry venv and install the matching wheel with pip inside
 that venv (recommended when Poetry cannot fetch the wheel directly):
 
-```pwsh
-poetry shell
-python -m pip install "cupy-cuda12x==13.6.0"
-```
-
-Replace `cupy-cuda12x` with the correct `cupy-cuda11x` variant if your
-system uses CUDA 11.x.
-
-3) Fix NVRTC / header errors
-
-If you see errors about missing headers (e.g. `cuda_fp16.h`), use a
-`-devel` CUDA base image or provide the CUDA toolkit headers to the
-runtime (bind-mount `/usr/local/cuda/include` into the container and set
-`CUDA_HOME`/`CPATH` accordingly).
-
-4) Verify from the same Python environment
-
-```pwsh
-python -c "import cupy; print('cupy', cupy.__version__); print('cuda', cupy.cuda.runtime.getDeviceCount())"
-```
-
-Expected: CuPy imports and `getDeviceCount()` returns >= 1. If `0`,
-confirm the scheduler allocated GPUs and `CUDA_VISIBLE_DEVICES` is set.
-
-Starting on Slurm
------------------
-Use the provided launcher `hpc/slurm_run_multiGPU.sh`. Key points:
-
-- Request GPUs per node: `#SBATCH --gres=gpu:<N>`
-- One rank per GPU: set `--ntasks-per-node` equal to GPUs per node
-- Use `srun --mpi=pmix` so SLURM propagates `CUDA_VISIBLE_DEVICES`
-- For containers, use `singularity exec --nv` (or equivalent) to expose GPUs
-
-Example submit:
-
-```pwsh
-sbatch hpc/slurm_run_multiGPU.sh
-```
-
-Minimal troubleshooting checklist
----------------------------------
-- `No module named 'cupy'`: ensure you installed the wheel into the
-  Poetry venv used by this project.
-- `cupy` imports but `getDeviceCount()` is 0: ensure the job reserves GPUs
-  and `CUDA_VISIBLE_DEVICES` is set in the job environment.
-- NVRTC header errors: use `-devel` CUDA image or provide toolkit headers.
-
-Notes / recommended improvement
-------------------------------
-- Currently `gpu_kernels.py` imports `cupy` at module import time and will
-  raise if CuPy is absent. That behavior helps avoid silent CPU fallbacks
-  in production, but it makes local testing harder. Consider a small
-  refactor to lazily import CuPy inside GPU-specific functions so the
-  module can be imported on CPU-only machines without a test shim.
-
-If you want, I can add `TESTING_PI.md` with detailed Pi/CI run steps or
-implement the lazy-import refactor.
-multiGPU package
+multiGPU README
 ===============
 
-Purpose
--------
-This package contains modular, low-level building blocks to run the baseline
-`vendor` DEM inversion algorithms on single-node or multi-node clusters using
-explicit MPI for distribution and CuPy/numba for GPU acceleration.
+Overview
+--------
+`src.multiGPU` provides a compact multi-GPU implementation of the DEM (Differential Emission Measure) reconstruction pipeline for HPC clusters. It uses:
+- MPI (via `mpi4py`) for rank orchestration and data distribution
+- CuPy for GPU-accelerated linear algebra (SVD-based solver)
+- Optional CUDA streams + pinned memory for overlap of compute and transfers
 
-Current status (important)
+Key components
+- `gpu_kernels.py`: Batched, GPU-first kernels (CuPy), adaptive batch sizing, optional NVTX ranges and fused kernels.
+- `mpi_manager.py`: Rank/GPU mapping, robust scatter/gather helpers, barriers.
+- `main.py`: CLI orchestrator; enumerates inputs, scatters work, runs kernels, gathers/saves outputs.
+- `logging.py`: Rank-aware logging with minimal console noise.
+- `preempt.py`: Best‑effort preemption handlers for schedulers.
+- `checkpoint.py`: Atomic checkpoint saves with optional async write.
+
+Prerequisites
+-------------
+Hardware
+- NVIDIA GPUs with recent CUDA support (tested with CUDA 12.x; CUDA 11.x also works with matching CuPy wheel)
+- Nodes with NVLink preferred for intra-node P2P; IB- or high-speed fabric for inter-node (optional)
+
+Software
+- Python 3.11+ (project uses Poetry for dependency management)
+- CUDA driver compatible with your chosen CuPy wheel (e.g., CUDA 12.x)
+- CuPy: install a prebuilt wheel matching your CUDA version (e.g., `cupy-cuda12x`)
+- mpi4py + MPI runtime (e.g., OpenMPI/PMIx on cluster)
+- Optional: Singularity/Apptainer to run the provided container (`containers/python_poetry.def`)
+- Optional: Nsight Systems CLI (`nsys`) inside container for profiling
+
+Cluster Middleware
+- Slurm (the provided launcher `hpc/slurm_run_multiGPU.sh` assumes Slurm + Singularity)
+
+Installation
+------------
+Option A — Container-first (recommended on clusters)
+1) Build the container (Singularity/Apptainer). Example (on a Linux host with Singularity):
+   - See `containers/python_poetry.def` to build an SIF image.
+2) Submit jobs with `hpc/slurm_run_multiGPU.sh`. The script mounts the repo into `/workspace`, sets up Poetry in-container, and runs the orchestrator.
+
+Option B — Host install (development)
+1) Install Poetry and create the venv:
+   ```pwsh
+   poetry install
+   ```
+2) Install a matching CuPy wheel inside the Poetry venv (example for CUDA 12.x):
+   ```pwsh
+   poetry run python -m pip install "cupy-cuda12x==13.6.0"
+   ```
+   For CUDA 11.x, use `cupy-cuda11x`. Verify CuPy and GPUs from the same env:
+   ```pwsh
+   poetry run python -c "import cupy as cp; print(cp.__version__, cp.cuda.runtime.getDeviceCount())"
+   ```
+3) Ensure `mpi4py` can locate your MPI runtime (on Windows, prefer WSL or Linux for MPI/GPU work).
+
+Execution
+---------
+Data expectations
+- Preferred input: `dn` and `edn` arrays shaped `(n_pixels, n_filters)`; `edn` may be `(1, n_filters)` to broadcast.
+- Alternate: `bands` layout `(n_filters, ny, nx)`; the loader flattens to `(n_pixels, n_filters)` and can subsample for quick tests.
+
+Entrypoint options
+1) Slurm launcher (recommended)
+   - Submit with defaults:
+     ```bash
+     sbatch hpc/slurm_run_multiGPU.sh
+     ```
+   - Useful overrides (pass via `--export` or `export` before sbatch):
+     - `ENTRY=src.multiGPU.main` (Python `-m` module to run)
+     - `INPUT_DIR=data/np32`
+     - `PROFILE=1` (enable Nsight Systems if `nsys` is in the container)
+     - `MULTIGPU_NVTX=1` (NVTX ranges in kernels)
+     - `MULTIGPU_STREAMS=1` (async D2H overlap; default on)
+     - `MULTIGPU_BATCH_SIZE=<N>` (override adaptive batch; 0 = auto)
+
+Environment toggles (complete)
+------------------------------
+These variables can be exported before `sbatch` or passed via `--export` to `hpc/slurm_run_multiGPU.sh`.
+
+- Job/entry selection
+  - `ENTRY` (str): Python module to run (default: `src.multiGPU.main`).
+  - `INPUT_DIR` (path): Folder with `.npz` inputs (default: `data/np32`).
+  - `LOG_ROOT` (path): Root for rank logs and Nsight traces (default: `src/multiGPU/logs`).
+
+- Multi-GPU runtime (code-level)
+  - `MULTIGPU_BATCH_SIZE` (int): 0 = auto (adaptive by free mem). >0 forces a fixed batch size.
+  - `MULTIGPU_NVTX` (0/1): Enable Python-level NVTX ranges (requires `poetry install --with profiling`).
+  - `MULTIGPU_STREAMS` (0/1): Enable CUDA streams + pinned host buffers for async D2H overlap (default 1).
+  - `MULTIGPU_STREAMS_DEPTH` (int): Pinned ring buffer depth for async copies (default 2; 2–3 typical).
+  - `MULTIGPU_NO_FUSE` (0/1): Disable `cp.fuse()` wrappers in kernels (debug/determinism; default 0).
+  - `MULTIGPU_VERBOSE` (0/1): Extra info logs in kernel paths (default 0).
+  - `MULTIGPU_PREEMPT` (0/1): Register preemption signal handlers (best-effort checkpoint hook; default 0).
+  - `MULTIGPU_SAVE_COMPRESSED` (0/1): Save aggregated outputs with compression (default 0 = plain `.npz`).
+  - Logging controls: `MULTIGPU_LOG_LEVEL` (e.g., `INFO`), `MULTIGPU_QUIET` (1 to suppress per-rank files at WARNING+), `MULTIGPU_RANK_FILES` (1 to force per-rank logs).
+
+- Profiling (Nsight Systems via Slurm script)
+  - `PROFILE` (0/1): Enable `nsys profile` in the container.
+  - `NSYS_OPTS` (csv): Trace domains (default `cuda,nvtx,osrt,cublas,cusolver`).
+  - `NSYS_OUT_DIR_HOST` / `NSYS_TMP_DIR_HOST`: Host output and temp directories for Nsight files.
+
+- Communication/NCCL/UCX (Slurm script)
+  - `UCX_TLS`, `UCX_NET_DEVICES`: UCX transport selection.
+  - `NCCL_DEBUG`, `NCCL_P2P_LEVEL`, `NCCL_*`: NCCL tuning variables (defaults are safe).
+  - `CUDA_DEVICE_ORDER=PCI_BUS_ID`: Stable PCI ordering.
+
+2) Manual run (single node, already on a GPU host)
+   - Poetry, local filesystem:
+     ```pwsh
+     # PowerShell
+     $env:MULTIGPU_NVTX = "1"
+     $env:MULTIGPU_STREAMS = "1"
+     poetry run python -m src.multiGPU.main --input-dir data/np32
+     ```
+   - With `srun` binding GPUs to ranks (1 rank/GPU):
+     ```bash
+     srun --ntasks-per-node=4 --gpus-per-task=1 \
+          --cpu-bind=cores --gpu-bind=closest --mpi=pmix \
+          poetry run python -m src.multiGPU.main --input-dir data/np32
+     ```
+
+CLI arguments (from `main.py`)
+- `--input-dir <path>`: Folder containing `.npz` files. Rank 0 enumerates and broadcasts the list.
+- `--max-samples <N>`: Optional cap for pixels per file (quick sampling when flattening `bands`).
+
+Outputs
+- Aggregated per-file output saved by rank 0 to `data/results_multiGPU/dem_all_<input>.npz` (toggle compression with `MULTIGPU_SAVE_COMPRESSED=1`).
+
+Operational environment variables (selected)
+- GPU kernel controls (see `gpu_kernels.py`):
+  - `MULTIGPU_BATCH_SIZE` (int): 0 = adaptive (default). Set > 0 to override.
+  - `MULTIGPU_NVTX` (0/1): Add NVTX ranges in kernels.
+  - `MULTIGPU_STREAMS` (0/1): Enable CUDA streams + pinned async D2H.
+  - `MULTIGPU_STREAMS_DEPTH` (int): Ring-buffer depth for pinned staging (default 2).
+  - `MULTIGPU_NO_FUSE` (0/1): Disable cp.fuse wrappers for debugging.
+  - `MULTIGPU_VERBOSE` (0/1): Extra logs (batching, memory pool).
+  - `MULTIGPU_PREEMPT` (0/1): Register preemption handlers.
+- NCCL/UCX tuning (in `slurm_run_multiGPU.sh`):
+  - `UCX_TLS`, `NCCL_DEBUG`, `NCCL_P2P_LEVEL`, `NCCL_ALGO`, `NCCL_*CHANNELS`, `CUDA_DEVICE_ORDER=PCI_BUS_ID`.
+
+Performance considerations
 --------------------------
-- The code in `src/multiGPU/gpu_kernels.py` currently imports `cupy` at
-  module import time and will raise ImportError if `cupy` is not installed.
-  This means the module is not importable on systems without CuPy unless a
-  test shim or refactor is used. Although many functions are written to
-  perform CPU work, the current implementation intentionally fails early to
-  avoid silently falling back to CPU when the package is used in a true
-  multi-GPU context.
-- `src/multiGPU/mpi_manager.py` attempts to import `cupy` at module import
-  time as well (used to query device counts). `init_mpi()` and other helpers
-  do support serial operation when `mpi4py` is absent (they return
-  `comm=None, rank=0, size=1`).
+Batch size and memory
+- Adaptive batching uses current free GPU memory and dominant tensor sizes (SVD + lambda search) to choose batch size.
+- Override with `MULTIGPU_BATCH_SIZE` for predictable behavior (e.g., performance sweeps).
 
-Layout (what's actually in the package)
---------------------------------------
-- `src/multiGPU/main.py` — CLI entry point and orchestrator. Initializes
-  MPI (if available), maps local ranks to GPUs, shards data across ranks,
-  and invokes the per-rank processing loop. Note: `main.py` calls
-  `mmpi._require_cupy()` in the GPU execution path and may raise if CuPy
-  is not importable when a GPU is required.
-- `src/multiGPU/gpu_kernels.py` — Numeric kernels and GPU-aware algorithms.
-  The module prefers CuPy for performance. Key functions:
-  - `safe_svd(A, ...)` — runs SVD on device via CuPy and converts outputs
-    to NumPy arrays; raises `RuntimeError` if the GPU SVD fails.
-  - `safe_pinv(A, ...)` — pseudo-inverse wrapper built on `safe_svd`.
-  - `dem_reg_map(...)` — regularization parameter search; written to use
-    CuPy arrays when `GPU_AVAILABLE` is True but relies on CuPy APIs.
-  - `demmap_pos(...)` — batched wrapper that drives a GPU-accelerated
-    batched SVD path when `GPU_AVAILABLE` is True; it raises a
-    `RuntimeError` if the GPU path fails so calls don't silently continue
-    on CPU in multi-GPU mode.
-  - `dem_pix(...)` — intentionally raises in this multiGPU module; the
-    single-node baseline implementation provides single-pixel evaluation.
-- `src/multiGPU/mpi_manager.py` — Lightweight MPI helpers. Provides:
-  - `init_mpi()` — returns `(comm, rank, size)`; falls back to serial when
-    `mpi4py` is unavailable.
-  - `get_local_rank_info()` — determines node-local rank using `comm`.
-  - `scatterv_array()` / `gatherv_array()` — helpers for row-wise array
-    distribution using MPI byte-wise collectives.
-  - `set_device_for_local_rank()` / `map_rank_to_gpu()` / `bind_gpu()` —
-    small helpers to map ranks to GPUs and set `CUDA_VISIBLE_DEVICES`.
-- `src/multiGPU/io.py` — input helpers and shape normalization.
-- `src/multiGPU/checkpoint.py` — checkpoint manager for atomic saves.
-- `src/multiGPU/preempt.py` — preemption handlers for graceful checkpointing.
+Overlap compute and transfers
+- `MULTIGPU_STREAMS=1` enables asynchronous device-to-host copies into pinned buffers using a copy stream while the compute stream proceeds with the next batch.
+- Tune `MULTIGPU_STREAMS_DEPTH` (2–3 typically sufficient) for deeper overlap.
 
-Notes about input files
-----------------------
-- Preferred: `dn` of shape `(n_pixels, n_filters)` and `edn` of shape
-  `(n_pixels, n_filters)` (or `(1, n_filters)` to be broadcast).
-- Supported: `bands` layout `(n_filters, ny, nx)` — the script will flatten
-  to `(n_pixels, n_filters)` and may sample down with `--max-samples`.
+CuPy and memory pools
+- CuPy’s default memory pool is leveraged implicitly; heavy runs benefit from fewer allocs and better reuse. The workspace manager can free blocks between very large runs.
 
-CLI Arguments
---------------
-- `--input-dir <path>`: path to the input folder.
-- `--max-samples N`: limit number of pixels sampled for rapid development.
+Profiling and visibility
+- Set `MULTIGPU_NVTX=1` for NVTX ranges (works with Nsight Systems/Compute).
+- Enable `PROFILE=1` in the Slurm script to run under `nsys` inside the container. Traces are written to `data/results_multiGPU/nsys/` and converted to `.nsys-rep` after the run.
 
-Outputs and persistence
------------------------
-`demmap_pos` returns per-pixel results (same shapes as the baseline):
-- `dem` : `(n_pixels, n_temp_bins)` — recovered DEM.
-- `edem`: `(n_pixels, n_temp_bins)` — uncertainties.
-- `elogt`: `(n_pixels, n_temp_bins)` — effective temperature widths.
-- `chisq`: `(n_pixels,)` — per-pixel chi-square.
-- `dn_reg`: `(n_pixels, n_filters)` — reconstructed DN from DEM.
+NVTX legend
+-----------
+Enable with `MULTIGPU_NVTX=1`. You’ll see the following ranges in Nsight:
+- GPU kernel phases (colors shown when Python-level NVTX is active):
+  - `DEM_SOLVE_INIT` — 0x455A64 (setup: device copies, matrices, batch size)
+  - `STREAMS_INIT` — 0x00796B (create compute/copy streams)
+  - `PINNED_POOL_INIT` — 0x303F9F (allocate pinned host buffers)
+  - `BATCH[b0:b1)` — 0xFF6F00 (per-batch envelope) containing:
+    - `BATCH_PREP` (batch slicing, response prep)
+    - `SVD` (batched rectangular SVD)
+    - `LAMBDA_SELECT` (per-sample regularization search)
+    - `RECONSTRUCTION_CALC` (DEM reconstruction + predictions)
+    - `DEVICE_TO_HOST` (D2H copies; may be async when streams enabled)
+- MPI collectives (appear around data distribution/aggregation):
+  - `MPI.Scatterv`
+  - `MPI.Gatherv`
+  - `MPI.Barrier`
 
-By default `main.py` gathers per-rank outputs and prints a summary. For
-production runs persist gathered arrays to disk using atomic writes.
+Notes
+- If the `nvtx` Python package isn’t present, tags are no-ops; Nsight CUDA-level tags may still appear when supported by CuPy.
+- Colors are applied to the top-level Python NVTX ranges listed above; inner CUDA ranges use default colors.
 
-Checkpointing and preemption
----------------------------
-Use `CheckpointManager` and `register_preempt_handlers` to handle
-preemption and to perform atomic checkpoint saves. See `src/multiGPU/checkpoint.py`
-and `src/multiGPU/preempt.py` for examples.
+Binding and locality
+- The launcher uses `--cpu-bind=cores` and `--gpu-bind=closest` with `--distribution=block:block`, which works well for 1 rank/GPU on a single node. On multi-node runs, ensure network fabrics are configured (UCX/NCCL) and consider IB vs. SHM path selection.
 
+Scalability notes
+- Work is embarrassingly parallel across pixels. Most scaling is intra-node and linear with GPUs per node; inter-node scaling is dominated by IO/gather and storage bandwidth.
+- For very large images (millions of pixels), prefer larger batches (when memory allows) to amortize SVD setup; the heuristic increases batch size conservatively.
 
-Batched GPU/SVD tuning notes
----------------------------
-- `demmap_pos` contains a batched CUDA/SVD path that tries to amortize
-  SVD costs using CuPy's batched operations. Tune `block` to fit
-  GPU memory. As a rough heuristic: batch_mem ≈ batch_size * nt * nf * 8
-  bytes * safety_factor (0.6).
-- The GPU path attempts retries with smaller batches in case of
-  allocation/memory failures; however, when the GPU path ultimately fails
+Troubleshooting
+---------------
+Quick checks
+- `cupy` not found: Install the correct wheel into the Poetry venv or container. Verify from the same env.
+- `getDeviceCount() == 0`: The job likely has no GPUs or `CUDA_VISIBLE_DEVICES` is empty; confirm Slurm allocation and container `--nv` passthrough.
+- NVRTC/header errors: Use a `-devel` CUDA base or bind toolkit headers (`/usr/local/cuda/include`); set `CUDA_HOME`/`CPATH` if necessary.
+- MPI errors in dev: Use the Slurm launcher or run on Linux/WSL with a proper MPI installation; Windows native MPI + GPUs is not a typical dev path.
+
+Appendix: module map
+--------------------
+- `main.py` — enumerates inputs, scatters per-rank rows, runs `gpu_kernels.demmap_pos`, gathers/saves.
+- `gpu_kernels.py` — adaptive batching, batched SVD, lambda selection, optional streams/NVTX/fused ops.
+- `mpi_manager.py` — `init_mpi()`, `get_local_rank_info()`, `scatterv_array()`, `gatherv_array()`, and GPU binding helpers.
+- `logging.py` — safe per-rank logs + quiet console.
+- `preempt.py` — signal handlers to run a user callback and barrier.
+- `checkpoint.py` — atomic saves with pruning; async write option.
   the module raises `RuntimeError` to avoid silent fallbacks in
-  multi-GPU production runs.
