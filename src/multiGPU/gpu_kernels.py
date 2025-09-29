@@ -367,8 +367,6 @@ class GPUWorkspaceManager:
                     dtype,
                 )
             except Exception as e:
-                # Correctly call logger.warning (previously broken by a
-                # line split)
                 self.logger.warning(
                     "Failed to allocate workspace %s: %s", name, e
                 )
