@@ -8,7 +8,9 @@ helpers to run the project's DEM inversion workloads on multi-GPU clusters.
 
 Contents
 --------
-- `gpu_kernels.py` — GPU-first numerical kernels (expects CuPy at import).
+- `gpu_kernels.py` — GPU-first numerical kernels (expects CuPy at import). This
+  module is GPU-only: `demmap_pos` will raise `RuntimeError` when no CUDA
+  devices are available, rather than silently falling back to a CPU path.
 - `mpi_manager.py` — MPI helpers, scatter/gather, and GPU mapping.
 - `main.py` — CLI entrypoint that initializes MPI, maps GPUs, and runs
   batched processing per rank.
@@ -157,6 +159,16 @@ CLI arguments (from `main.py`)
 Outputs
 - Aggregated per-file output saved by rank 0 to `data/results_multiGPU/dem_all_<input>.npz` (toggle compression with `MULTIGPU_SAVE_COMPRESSED=1`).
 
+Behavior on systems without GPUs
+--------------------------------
+This module is designed for GPU execution. When `cp.cuda.runtime.getDeviceCount()`
+reports 0, `src.multiGPU.gpu_kernels.demmap_pos` raises:
+
+> RuntimeError: No CUDA device available. multiGPU.demmap_pos requires a GPU.
+
+This explicit error helps catch misconfigured environments early (e.g., missing
+`--nv` in Singularity, empty `CUDA_VISIBLE_DEVICES`, or running locally without a GPU).
+
 Operational environment variables (selected)
 - GPU kernel controls (see `gpu_kernels.py`):
   - `MULTIGPU_BATCH_SIZE` (int): 0 = adaptive (default). Set > 0 to override.
@@ -232,3 +244,22 @@ Appendix: module map
 - `preempt.py` — signal handlers to run a user callback and barrier.
 - `checkpoint.py` — atomic saves with pruning; async write option.
   the module raises `RuntimeError` to avoid silent fallbacks in
+
+Vendor parity notes
+-------------------
+The function `src.multiGPU.gpu_kernels.demmap_pos` is now a faithful port of the vendor algorithm used in `src.baseline.vendor.demmap_pos` and its dependencies:
+
+- Self-normalized L pass: When `dem_norm0` is not provided (or is all ones) and `glc` has no selected filters, we execute an initial GSVD using `L0 = diag(1/sqrt(dlogt))`, compute a provisional DEM, and use it to derive the constraint weights. We then smooth these weights with a 5-point moving average over the interior and clamp with a minimum of 1e-8, matching vendor behavior.
+- EM loci weighting: When `glc` selects filters, we compute the minimum of the EM loci across selected channels to form the initial constraint weights, apply the same smoothing and clamping, and proceed.
+- dem_norm0: If provided and not trivial (not all ones/zero), it is honored directly as the weighting for L.
+- Regularization parameter: We use the same discrepancy-principle search (`dem_reg_map`) with identical geometric sampling of `mu`, identical coefficient formation, and selection criterion.
+- Reconstruction and positivity loop: The GSVD factors and reconstruction follow the same equations and we iterate the `reg_tweak` by `rgt_fact` until positivity or `max_iter`.
+- edem and elogt: Vertical and horizontal errors are computed identically using `kdag@kdag.T` and the half-maximum width of `kdagk` interpolated over the fixed `ltt` grid.
+- rscl: When enabled, we rescale DEM and edem by the mean ratio of observed to predicted counts and recompute `dn_reg` and `chisq`.
+
+Implementation notes that lead to identical results:
+- We use `safe_svd` and `safe_pinv` to sanitize inputs (NaN/inf clipping, value bounds) before SVD, analogous to the vendor's robustness. This does not change outputs for finite inputs but prevents numerical pathologies on corner cases.
+- Shapes: `dem_inv_gsvd` returns `U_T` as `U.T` to match vendor indexing; we slice `U_T[:nf,:nf]` consistently like the vendor code.
+- Floating precision: All internal computations are in float64 to preserve numerical parity; callers can cast outputs as needed.
+
+There are no runtime toggles to switch to the vendor implementation; this code path is self-contained and functionally equivalent.

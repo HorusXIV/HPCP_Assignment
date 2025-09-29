@@ -62,18 +62,13 @@ def main():
 
     # Results root (single aggregate folder, no per-rank files)
     results_root = "data/results_multiGPU"
-    log_root = 'src/multiGPU/logs'
+    log_root = "src/multiGPU/logs"
     if rank == 0:
         os.makedirs(results_root, exist_ok=True)
     # Logging once
     _ = mlog.setup_logging(log_root, rank=rank, size=size)
     log = logging.getLogger(__name__)
-    log.info(
-        "Starting rank %d/%d; results dir: %s",
-        rank,
-        size - 1,
-        results_root
-    )
+    log.info("Starting rank %d/%d; results dir: %s", rank, size - 1, results_root)
 
     # Map rank to GPU based on node-local rank
     with nvtx_range("RANK_GPU_BIND", color=0x009688):
@@ -103,16 +98,12 @@ def main():
             _preempt.register_preempt_handlers(_on_preempt_save, comm=comm)
             log.info("Preemption handlers registered (rank %d)", rank)
         except Exception:
-            log.warning("Failed to register preemption handlers",
-                        exc_info=True
-                        )
+            log.warning("Failed to register preemption handlers", exc_info=True)
 
     # Inputs must be provided
     if not args.input_dir:
         if rank == 0:
-            raise RuntimeError(
-                "Must specify --input-dir to process input files"
-                )
+            raise RuntimeError("Must specify --input-dir to process input files")
         return
 
     # Rank 0 enumerates inputs; broadcast list
@@ -133,11 +124,9 @@ def main():
 
     if rank == 0:
         log.info(
-            "Processing %d input files across %d ranks" % (
-                len(all_inputs),
-                size),
-            extra={"general": True}
-            )
+            "Processing %d input files across %d ranks" % (len(all_inputs), size),
+            extra={"general": True},
+        )
 
     # Iterate inputs: rank 0 loads/scatters; all ranks compute/gather
     for input_path in all_inputs:
@@ -145,8 +134,7 @@ def main():
         with nvtx_range(file_label, color=0xFF9800):
             if rank == 0:
                 log.info(
-                    f"Starting processing input {input_path}",
-                    extra={"general": True}
+                    f"Starting processing input {input_path}", extra={"general": True}
                 )
             try:
                 # Prepare data on rank 0
@@ -161,10 +149,7 @@ def main():
                             bands = data["bands"]
                             if bands.ndim != 3:
                                 raise RuntimeError(
-                                    (
-                                        "Unexpected `bands` shape; "
-                                        "expected (nf, ny, nx)"
-                                    )
+                                    ("Unexpected `bands` shape; expected (nf, ny, nx)")
                                 )
                             nf, ny, nx = bands.shape
                             n_pixels = ny * nx
@@ -174,10 +159,7 @@ def main():
                                 and n_pixels > args.max_samples
                             ):
                                 idx = np.linspace(
-                                    0,
-                                    n_pixels - 1,
-                                    num=args.max_samples,
-                                    dtype=int
+                                    0, n_pixels - 1, num=args.max_samples, dtype=int
                                 )
                                 dn2d = bands_flat[:, idx].T
                             else:
@@ -190,10 +172,7 @@ def main():
                                 edn2d = mio.ensure_2d_dn(arrays[1])
                             else:
                                 raise RuntimeError(
-                                    (
-                                        "Input file missing required"
-                                        "dn and edn arrays"
-                                    )
+                                    ("Input file missing requireddn and edn arrays")
                                 )
                     else:
                         dn2d = mio.ensure_2d_dn(dn)
@@ -204,16 +183,12 @@ def main():
                             edn2d = np.repeat(edn2d, dn2d.shape[0], axis=0)
                         else:
                             raise RuntimeError(
-                                (
-                                    "edn shape does not match"
-                                    "dn and cannot be broadcast"
-                                )
+                                ("edn shape does not matchdn and cannot be broadcast")
                             )
 
                     n_samples = int(dn2d.shape[0])
                     counts = [
-                        n_samples // size
-                        + (1 if i < (n_samples % size) else 0)
+                        n_samples // size + (1 if i < (n_samples % size) else 0)
                         for i in range(size)
                     ]
                     dn_dtype_name = str(dn2d.dtype)
@@ -235,15 +210,11 @@ def main():
                         edn_dtype = np.dtype(edn_dtype_name)
                     with nvtx_range("SCATTER_DN", color=0x43A047):
                         local_dn = mmpi.scatterv_array(
-                            comm,
-                            dn2d if rank == 0 else None,
-                            counts, dtype=dn_dtype
+                            comm, dn2d if rank == 0 else None, counts, dtype=dn_dtype
                         )
                     with nvtx_range("SCATTER_EDN", color=0x2E7D32):
                         local_edn = mmpi.scatterv_array(
-                            comm,
-                            edn2d if rank == 0 else None, counts,
-                            dtype=edn_dtype
+                            comm, edn2d if rank == 0 else None, counts, dtype=edn_dtype
                         )
                 else:
                     # Serial path
@@ -258,12 +229,38 @@ def main():
                 dlogt = np.full(nt, logt[1] - logt[0])
                 tresp = np.ones((nt, nf))
 
+                # Verbose rank diagnostics: pixels and memory estimates
+                try:
+                    verbose = mlog.verbose_enabled()
+                except Exception:
+                    verbose = False
+                if verbose:
+                    na_rank = int(local_dn.shape[0])
+                    nf_rank = int(nf)
+                    nt_rank = int(nt)
+                    nmu_rank = 42
+                    plan = gpu_kernels.estimate_batch_plan(
+                        na_rank, nf_rank, nt_rank, nmu_rank
+                    )
+                    bytes_per_img = int(plan.get("bytes_per_sample", 0) * nt_rank)
+                    log.info(
+                        "[metrics] rank=%d pixels=%d nf=%d nt=%d batch_size=%d num_batches=%d bytes_per_sample=%d est_batch_bytes=%d per_image_bytes~=%d free_bytes=%s",
+                        rank,
+                        na_rank,
+                        nf_rank,
+                        nt_rank,
+                        int(plan.get("batch_size", 0)),
+                        int(plan.get("num_batches", 0)),
+                        int(plan.get("bytes_per_sample", 0)),
+                        int(plan.get("est_batch_bytes", 0)),
+                        int(bytes_per_img),
+                        str(plan.get("free_bytes")),
+                    )
+
                 # Ensure CuPy is present and a GPU is assigned
                 mmpi._require_cupy()
                 if gpu_assigned is None or gpu_assigned < 0:
-                    raise RuntimeError(
-                        "No GPU assigned for multiGPU execution"
-                        )
+                    raise RuntimeError("No GPU assigned for multiGPU execution")
 
                 # Compute once; internal batching happens inside demmap_pos
                 with nvtx_range("GPU_COMPUTE", color=0xE65100):
@@ -274,26 +271,24 @@ def main():
                         chisq_local,
                         dn_reg_local,
                     ) = gpu_kernels.demmap_pos(
-                        local_dn, local_edn, tresp, logt, dlogt, np.ones(nf)
+                        local_dn,
+                        local_edn,
+                        tresp,
+                        logt,
+                        dlogt,
+                        np.ones((nf,), dtype=float),
                     )
 
                 # Gather results on root
                 if comm is not None:
                     with nvtx_range("GATHER_DEM", color=0x6D4C41):
-                        dem_all = mmpi.gatherv_array(
-                            comm,
-                            dem_local,
-                            counts,
-                            root=0
-                        )
+                        dem_all = mmpi.gatherv_array(comm, dem_local, counts, root=0)
                     with nvtx_range("POST_GATHER_BARRIER", color=0x5D4037):
                         try:
                             mmpi.barrier(comm)
                         except Exception as e:
                             log.exception(
-                                "Rank %d: MPI barrier failed after gather: %s",
-                                rank,
-                                e
+                                "Rank %d: MPI barrier failed after gather: %s", rank, e
                             )
                 else:
                     dem_all = dem_local
@@ -302,8 +297,8 @@ def main():
                 if rank == 0 and dem_all is not None:
                     log.info(
                         f"Computed total DEMs: {dem_all.shape[0]}",
-                        extra={"general": True}
-                        )
+                        extra={"general": True},
+                    )
                     out_dir = results_root
                     os.makedirs(out_dir, exist_ok=True)
                     inbase = os.path.splitext(os.path.basename(input_path))[0]
@@ -329,10 +324,7 @@ def main():
                     )
             except Exception as e:
                 log.exception(
-                    "Rank %d: exception while processing %s: %s",
-                    rank,
-                    input_path,
-                    e
+                    "Rank %d: exception while processing %s: %s", rank, input_path, e
                 )
                 raise
 
@@ -342,9 +334,7 @@ def main():
             try:
                 mmpi.barrier(comm)
             except Exception as e:
-                logging.getLogger(__name__).warning(
-                    "Final MPI barrier failed: %s", e
-                )
+                logging.getLogger(__name__).warning("Final MPI barrier failed: %s", e)
 
     # Clean shutdown of logging
     with nvtx_range("SHUTDOWN", color=0x9E9E9E):
