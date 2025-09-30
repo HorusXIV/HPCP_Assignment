@@ -9,8 +9,8 @@
 #SBATCH --hint=nomultithread      # disable hyperthreading
 #SBATCH --mem=32G                 # rather big memory for large images
 #SBATCH --signal=USR1@60          # preemptive signal for cleanup
-#SBATCH --output=src/multiGPU/logs/opt-%j.out
-#SBATCH --error=src/multiGPU/logs/opt-%j.err
+#SBATCH --output=src/multiGPU/logs/slurm-%j.out
+#SBATCH --error=src/multiGPU/logs/slurm-%j.err
 
 # could add #SBATCH --exclusive
 
@@ -21,15 +21,25 @@ REPO_DIR="${REPO_DIR:-$SLURM_SUBMIT_DIR}"
 IMAGE="${IMAGE:-$REPO_DIR/containers/python_poetry.sif}"
 ENTRY="${ENTRY:-src.multiGPU.main}"
 INPUT_DIR="${INPUT_DIR:-data/np32}"
-MAX_SAMPLES="${MAX_SAMPLES:-100000}"
+
 LOG_ROOT="${LOG_ROOT:-$REPO_DIR/src/multiGPU/logs}"
 
 PROFILE="${PROFILE:-0}"              # 1 = enable Nsight Systems (nsys)
 NSYS_OPTS="${NSYS_OPTS:-cuda,nvtx,osrt,cublas,cusolver}"
 
-MULTIGPU_NVTX="${MULTIGPU_NVTX:-0}" # NVTX ranges in kernels
-MULTIGPU_STREAMS="${MULTIGPU_STREAMS:-1}" # overlap compute/transfers
-MULTIGPU_STREAMS_DEPTH="${MULTIGPU_STREAMS_DEPTH:-2}"
+# 1 = run under pyinstrument and write HTML profile, 0 = run plain python
+PYPROFILE="${PYPROFILE:-0}"
+
+# NVTX: enable by default when profiling, unless the user explicitly set it
+if [[ "$PROFILE" == "1" ]]; then
+  if [[ -z "${MULTIGPU_NVTX+x}" ]]; then
+    export MULTIGPU_NVTX=1
+  else
+    export MULTIGPU_NVTX="${MULTIGPU_NVTX}"
+  fi
+else
+  export MULTIGPU_NVTX="${MULTIGPU_NVTX:-0}"
+fi
 
 # Nsight Systems output and temp dirs
 NSYS_OUT_DIR_HOST="${NSYS_OUT_DIR_HOST:-$LOG_ROOT/nsys}"
@@ -42,35 +52,21 @@ cd "$REPO_DIR"
 mkdir -p "$LOG_ROOT/rank_logs"
 
 export MULTIGPU_BATCH_SIZE="${MULTIGPU_BATCH_SIZE:-0}"  # 0=auto, >0=override
-export MULTIGPU_STABLE_PINV="${MULTIGPU_STABLE_PINV:-1}"
-export MULTIGPU_KEEP_DEVICE="${MULTIGPU_KEEP_DEVICE:-1}"
-export MULTIGPU_VECTOR_DISABLE="${MULTIGPU_VECTOR_DISABLE:-0}"
-export MULTIGPU_STREAMS="${MULTIGPU_STREAMS}"
-export MULTIGPU_STREAMS_DEPTH="${MULTIGPU_STREAMS_DEPTH}"
 
 # Verbose diagnostics & logging controls
 export MULTIGPU_VERBOSE="${MULTIGPU_VERBOSE:-0}"           # 1=extra per-rank metrics
 export MULTIGPU_RANK_FILES="${MULTIGPU_RANK_FILES:-0}"     # 1=write rank logs even if quiet
 export MULTIGPU_LOG_LEVEL="${MULTIGPU_LOG_LEVEL:-WARNING}"    # INFO or DEBUG for details
 
-export UCX_TLS=${UCX_TLS:-sm,self,cuda_copy,cuda_ipc,rc}
-export UCX_NET_DEVICES=${UCX_NET_DEVICES:-all}
+
+# Minimal comm/runtime defaults; uncomment advanced tunables only if needed
 export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
-export NCCL_P2P_LEVEL=${NCCL_P2P_LEVEL:-NVL}
 export NCCL_ASYNC_ERROR_HANDLING=1
-export NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-0}
-export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-^lo,docker0}
-export NCCL_ALGO=${NCCL_ALGO:-Tree,Ring}
-export NCCL_SHM_DISABLE=${NCCL_SHM_DISABLE:-0}
-export NCCL_COLLNET_ENABLE=${NCCL_COLLNET_ENABLE:-0}
-export NCCL_MIN_NCHANNELS=${NCCL_MIN_NCHANNELS:-8}
-export NCCL_MAX_NCHANNELS=${NCCL_MAX_NCHANNELS:-32}
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 
+# CuPy basics
 export CUPY_CACHE_DIR="${CUPY_CACHE_DIR:-/workspace/.cupy_cache}"
-export CUPY_ACCELERATORS="cub"   
-export CUPY_COMPILE_WITH_PTX=1
-export CUPY_DUMP_CUDA_SOURCE_ON_ERROR=1
+export CUPY_ACCELERATORS="cub"
 export PYTHONUNBUFFERED=1
 
 # Normalize SLURM_CPUS_PER_TASK from TRES if mismatched
@@ -108,17 +104,15 @@ export POETRY_CACHE_DIR="/workspace/.cache/pypoetry"
 singularity exec --cleanenv --nv --bind "$REPO_DIR":/workspace "$IMAGE" \
   bash -lc 'set -e; cd /workspace; \
     if command -v poetry &>/dev/null; then \
-      if [ ! -f .venv/.installed ]; then \
-        poetry install --no-interaction --no-ansi; \
-        touch .venv/.installed; \
-      fi; \
+      poetry install --no-interaction --no-ansi; \
+    else \
+      echo "poetry not found in container; skipping install" >&2; \
     fi'
 
 
 PROFILE_CMD=""
 if [[ "$PROFILE" == "1" ]]; then
   if singularity exec --nv --bind "$REPO_DIR":/workspace "$IMAGE" bash -lc 'command -v nsys >/dev/null 2>&1'; then
-    mkdir -p "$NSYS_OUT_DIR_HOST" "$NSYS_TMP_DIR_HOST"
     PROFILE_CMD="nsys profile -t ${NSYS_OPTS} --force-overwrite=true --cuda-memory-usage=true --output=${NSYS_OUT_DIR_CTR}/nsys_rank%q{SLURM_PROCID}"
     export SINGULARITYENV_TMPDIR="${NSYS_TMP_DIR_CTR}"
     info "Nsight Systems enabled (${NSYS_OPTS}); output: ${NSYS_OUT_DIR_HOST}"
@@ -128,13 +122,22 @@ if [[ "$PROFILE" == "1" ]]; then
   fi
 fi
 
-# CPU/GPU binding strategy
 SRUN_BIND="--cpu-bind=cores --gpu-bind=closest --distribution=block:block --mpi=pmix --kill-on-bad-exit=1"
 
+# Concise config echo
+info "Config: LOG_LEVEL=${MULTIGPU_LOG_LEVEL} VERBOSE=${MULTIGPU_VERBOSE} PROFILE=${PROFILE} NVTX=${MULTIGPU_NVTX} BATCH_SIZE=${MULTIGPU_BATCH_SIZE}"
+
+# Minimal export list: always ALL; add SINGULARITYENV_TMPDIR only when profiling
+if [[ "$PROFILE" == "1" && -n "${NSYS_TMP_DIR_CTR:-}" ]]; then
+  EXPORT_ARGS="ALL,SINGULARITYENV_TMPDIR=${NSYS_TMP_DIR_CTR}"
+else
+  EXPORT_ARGS="ALL"
+fi
+
 srun ${SRUN_BIND} \
-  --export=ALL,SINGULARITYENV_TMPDIR=${NSYS_TMP_DIR_CTR:-},MULTIGPU_NVTX=${MULTIGPU_NVTX},MULTIGPU_BATCH_SIZE=${MULTIGPU_BATCH_SIZE},MULTIGPU_STABLE_PINV=${MULTIGPU_STABLE_PINV},MULTIGPU_KEEP_DEVICE=${MULTIGPU_KEEP_DEVICE},MULTIGPU_VECTOR_DISABLE=${MULTIGPU_VECTOR_DISABLE},MULTIGPU_STREAMS=${MULTIGPU_STREAMS},MULTIGPU_STREAMS_DEPTH=${MULTIGPU_STREAMS_DEPTH},MULTIGPU_VERBOSE=${MULTIGPU_VERBOSE},MULTIGPU_RANK_FILES=${MULTIGPU_RANK_FILES},MULTIGPU_LOG_LEVEL=${MULTIGPU_LOG_LEVEL} \
+  --export=${EXPORT_ARGS} \
   singularity exec --nv --bind "$REPO_DIR":/workspace "$IMAGE" \
-  bash -lc "cd /workspace && ${PROFILE_CMD} poetry run python -m ${ENTRY} --input-dir ${INPUT_DIR}"
+  bash -lc "cd /workspace && if [[ \"${PYPROFILE:-0}\" == \"1\" ]]; then ${PROFILE_CMD} poetry run pyinstrument -r html -o \"$LOG_ROOT/profile.html\" -m ${ENTRY} --input-dir ${INPUT_DIR}; else ${PROFILE_CMD} poetry run python -m ${ENTRY} --input-dir ${INPUT_DIR}; fi"
 
 
 SRUN_EXIT_CODE=$?
@@ -145,10 +148,3 @@ fi
 
 info "Completed with exit code $SRUN_EXIT_CODE"
 info "NVTX profiling (MULTIGPU_NVTX=${MULTIGPU_NVTX}); PROFILE=${PROFILE}"
-
-# Post-run: If any .qdstrm remain (e.g., packaging skipped due to abrupt exit), convert to .nsys-rep
-if [[ "$PROFILE" == "1" ]]; then
-  info "Post-processing Nsight traces in ${NSYS_OUT_DIR_HOST}"
-  singularity exec --nv --bind "$REPO_DIR":/workspace "$IMAGE" \
-    bash -lc "shopt -s nullglob; cd ${NSYS_OUT_DIR_CTR}; for q in *.qdstrm; do out=\"\${q%.qdstrm}.nsys-rep\"; echo 'Converting' \"\$q\" '->' \"\$out\"; nsys convert --input \"\$q\" --output \"\$out\" || true; done"
-fi

@@ -46,7 +46,7 @@ class ConsoleFilter(logging.Filter):
     ``extra={"general": True}``.
     """
 
-    def filter(self, record: logging.LogRecord) -> bool:  # type: ignore[override]
+    def filter(self, record: logging.LogRecord) -> bool:
         if record.levelno >= logging.WARNING:
             return True
         return bool(getattr(record, "general", False))
@@ -54,13 +54,15 @@ class ConsoleFilter(logging.Filter):
 
 def _make_formatter():
     """Return a formatter that tolerates missing ``rank`` attribute."""
-    fmt = "%(asctime)s - rank=%(rank)s - %(levelname)s - %(name)s - %(message)s"
+    fmt = (
+        "%(asctime)s - rank=%(rank)s - %(levelname)s - %(name)s - %(message)s"
+    )
 
     # Use a SafeFormatter that provides a default for missing fields like
     # `rank`.
 
     class SafeFormatter(logging.Formatter):
-        def format(self, record: logging.LogRecord) -> str:  # type: ignore[override]
+        def format(self, record: logging.LogRecord) -> str:
             if not hasattr(record, "rank"):
                 # attach a safe default if missing
                 setattr(record, "rank", "-")
@@ -102,22 +104,27 @@ def setup_logging(
         except Exception:
             pass
 
-    # Configure root log level (env override). Default to WARNING to keep
-    # quiet.
+    # Configure log levels
+    # We keep the root logger open (NOTSET) so handler-level filters decide
+    # what is emitted. This allows rank-0 "general" INFO messages to appear
+    # on the console even when the global level is WARNING.
     _lvl_name = os.environ.get("MULTIGPU_LOG_LEVEL", "WARNING").upper()
     _lvl = getattr(logging, _lvl_name, logging.WARNING)
-    root.setLevel(_lvl)
+    root.setLevel(logging.NOTSET)
     root.addFilter(RankFilter(rank))
 
     # Per-rank file handler (disabled in quiet mode unless forced)
     quiet_mode = (
-        _lvl >= logging.WARNING and os.environ.get("MULTIGPU_QUIET", "1") == "1"
+        _lvl >= logging.WARNING
+        and os.environ.get("MULTIGPU_QUIET", "1") == "1"
     )
     want_rank_files = (
         os.environ.get("MULTIGPU_RANK_FILES", "0") == "1" or verbose_enabled()
     )
     if (not quiet_mode) or want_rank_files:
-        per_rank_log = os.path.join(results_dir, "rank_logs", f"rank{rank:03d}.log")
+        per_rank_log = os.path.join(
+            results_dir, "rank_logs", f"rank{rank:03d}.log"
+        )
         os.makedirs(os.path.dirname(per_rank_log), exist_ok=True)
         fh_rank = logging.FileHandler(per_rank_log, mode="a")
         fh_rank.setLevel(_lvl)
@@ -125,12 +132,11 @@ def setup_logging(
         fh_rank.addFilter(RankFilter(rank))
         root.addHandler(fh_rank)
 
-    # Optional console for rank 0 only (keeps cluster logs tidy)
+    # console for rank 0 only (keeps cluster logs tidy)
     if console and rank == 0:
-        # Stream to stdout (not stderr) so Slurm writes these into .out,
-        # not .err
         sh = logging.StreamHandler(stream=sys.stdout)
-        sh.setLevel(_lvl)
+    # INFO-level records on console with ConsoleFilter
+        sh.setLevel(logging.INFO)
         sh.setFormatter(_make_formatter())
         sh.addFilter(RankFilter(rank))
         sh.addFilter(ConsoleFilter())

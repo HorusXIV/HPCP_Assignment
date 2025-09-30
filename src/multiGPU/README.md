@@ -38,7 +38,7 @@ Overview
 `src.multiGPU` provides a compact multi-GPU implementation of the DEM (Differential Emission Measure) reconstruction pipeline for HPC clusters. It uses:
 - MPI (via `mpi4py`) for rank orchestration and data distribution
 - CuPy for GPU-accelerated linear algebra (SVD-based solver)
-- Optional CUDA streams + pinned memory for overlap of compute and transfers
+- Optional NVTX ranges for profiling with Nsight Systems/Compute
 
 Key components
 - `gpu_kernels.py`: Batched, GPU-first kernels (CuPy), adaptive batch sizing, optional NVTX ranges and fused kernels.
@@ -70,7 +70,7 @@ Installation
 Option A — Container-first (recommended on clusters)
 1) Build the container (Singularity/Apptainer). Example (on a Linux host with Singularity):
    - See `containers/python_poetry.def` to build an SIF image.
-2) Submit jobs with `hpc/slurm_run_multiGPU.sh`. The script mounts the repo into `/workspace`, sets up Poetry in-container, and runs the orchestrator.
+2) Submit jobs with `hpc/slurm_run_multiGPU.sh`. The script mounts the repo into `/workspace`, sets up Poetry in-container, and runs the orchestrator. When `PROFILE=1`, it runs under `nsys` and auto-enables NVTX unless you explicitly set `MULTIGPU_NVTX`.
 
 Option B — Host install (development)
 1) Install Poetry and create the venv:
@@ -102,10 +102,10 @@ Entrypoint options
    - Useful overrides (pass via `--export` or `export` before sbatch):
      - `ENTRY=src.multiGPU.main` (Python `-m` module to run)
      - `INPUT_DIR=data/np32`
-     - `PROFILE=1` (enable Nsight Systems if `nsys` is in the container)
-     - `MULTIGPU_NVTX=1` (NVTX ranges in kernels)
-     - `MULTIGPU_STREAMS=1` (async D2H overlap; default on)
+     - `PROFILE=1` (enable Nsight Systems if `nsys` is in the container; auto-enables NVTX)
+     - `MULTIGPU_NVTX=1` (force NVTX on/off explicitly; overrides the launcher's default)
      - `MULTIGPU_BATCH_SIZE=<N>` (override adaptive batch; 0 = auto)
+     - `PYPROFILE=1` (use pyinstrument to generate an HTML profile instead of plain Python)
 
 Environment toggles (complete)
 ------------------------------
@@ -119,30 +119,28 @@ These variables can be exported before `sbatch` or passed via `--export` to `hpc
 - Multi-GPU runtime (code-level)
   - `MULTIGPU_BATCH_SIZE` (int): 0 = auto (adaptive by free mem). >0 forces a fixed batch size.
   - `MULTIGPU_NVTX` (0/1): Enable Python-level NVTX ranges (requires `poetry install --with profiling`).
-  - `MULTIGPU_STREAMS` (0/1): Enable CUDA streams + pinned host buffers for async D2H overlap (default 1).
-  - `MULTIGPU_STREAMS_DEPTH` (int): Pinned ring buffer depth for async copies (default 2; 2–3 typical).
   - `MULTIGPU_NO_FUSE` (0/1): Disable `cp.fuse()` wrappers in kernels (debug/determinism; default 0).
   - `MULTIGPU_VERBOSE` (0/1): Extra info logs in kernel paths (default 0).
   - `MULTIGPU_PREEMPT` (0/1): Register preemption signal handlers (best-effort checkpoint hook; default 0).
   - `MULTIGPU_SAVE_COMPRESSED` (0/1): Save aggregated outputs with compression (default 0 = plain `.npz`).
   - Logging controls: `MULTIGPU_LOG_LEVEL` (e.g., `INFO`), `MULTIGPU_QUIET` (1 to suppress per-rank files at WARNING+), `MULTIGPU_RANK_FILES` (1 to force per-rank logs).
 
-- Profiling (Nsight Systems via Slurm script)
-  - `PROFILE` (0/1): Enable `nsys profile` in the container.
+- Profiling (via Slurm script)
+  - `PROFILE` (0/1): Enable `nsys profile` in the container; auto-enables `MULTIGPU_NVTX=1` unless you override it.
   - `NSYS_OPTS` (csv): Trace domains (default `cuda,nvtx,osrt,cublas,cusolver`).
   - `NSYS_OUT_DIR_HOST` / `NSYS_TMP_DIR_HOST`: Host output and temp directories for Nsight files.
+  - `PYPROFILE` (0/1): Use `pyinstrument` to create an HTML report at `$LOG_ROOT/profile.html`.
 
 - Communication/NCCL/UCX (Slurm script)
-  - `UCX_TLS`, `UCX_NET_DEVICES`: UCX transport selection.
-  - `NCCL_DEBUG`, `NCCL_P2P_LEVEL`, `NCCL_*`: NCCL tuning variables (defaults are safe).
-  - `CUDA_DEVICE_ORDER=PCI_BUS_ID`: Stable PCI ordering.
+  - Minimal defaults applied in the launcher: `NCCL_DEBUG=WARN`, `NCCL_ASYNC_ERROR_HANDLING=1`, `CUDA_DEVICE_ORDER=PCI_BUS_ID`.
+  - Advanced knobs (`UCX_TLS`, `UCX_NET_DEVICES`, `NCCL_P2P_LEVEL`, `NCCL_*`) are optional and cluster‑specific; tune only when you know your fabric.
 
 2) Manual run (single node, already on a GPU host)
-   - Poetry, local filesystem:
+  - Poetry, local filesystem:
      ```pwsh
      # PowerShell
      $env:MULTIGPU_NVTX = "1"
-     $env:MULTIGPU_STREAMS = "1"
+  # Optional NVTX for profiling
      poetry run python -m src.multiGPU.main --input-dir data/np32
      ```
    - With `srun` binding GPUs to ranks (1 rank/GPU):
@@ -173,8 +171,7 @@ Operational environment variables (selected)
 - GPU kernel controls (see `gpu_kernels.py`):
   - `MULTIGPU_BATCH_SIZE` (int): 0 = adaptive (default). Set > 0 to override.
   - `MULTIGPU_NVTX` (0/1): Add NVTX ranges in kernels.
-  - `MULTIGPU_STREAMS` (0/1): Enable CUDA streams + pinned async D2H.
-  - `MULTIGPU_STREAMS_DEPTH` (int): Ring-buffer depth for pinned staging (default 2).
+  
   - `MULTIGPU_NO_FUSE` (0/1): Disable cp.fuse wrappers for debugging.
   - `MULTIGPU_VERBOSE` (0/1): Extra logs (batching, memory pool).
   - `MULTIGPU_PREEMPT` (0/1): Register preemption handlers.
@@ -188,29 +185,27 @@ Batch size and memory
 - Override with `MULTIGPU_BATCH_SIZE` for predictable behavior (e.g., performance sweeps).
 
 Overlap compute and transfers
-- `MULTIGPU_STREAMS=1` enables asynchronous device-to-host copies into pinned buffers using a copy stream while the compute stream proceeds with the next batch.
-- Tune `MULTIGPU_STREAMS_DEPTH` (2–3 typically sufficient) for deeper overlap.
+- Data transfers and compute are batched; overlap strategies may be introduced in future revisions.
 
 CuPy and memory pools
 - CuPy’s default memory pool is leveraged implicitly; heavy runs benefit from fewer allocs and better reuse. The workspace manager can free blocks between very large runs.
 
 Profiling and visibility
-- Set `MULTIGPU_NVTX=1` for NVTX ranges (works with Nsight Systems/Compute).
-- Enable `PROFILE=1` in the Slurm script to run under `nsys` inside the container. Traces are written to `data/results_multiGPU/nsys/` and converted to `.nsys-rep` after the run.
+- Set `MULTIGPU_NVTX=1` for NVTX ranges (works with Nsight Systems/Compute). When `PROFILE=1` via Slurm, NVTX is auto-enabled unless overridden.
+- You can also set `PYPROFILE=1` to record a Python-level profile (HTML) instead of system timelines.
 
 NVTX legend
 -----------
 Enable with `MULTIGPU_NVTX=1`. You’ll see the following ranges in Nsight:
 - GPU kernel phases (colors shown when Python-level NVTX is active):
   - `DEM_SOLVE_INIT` — 0x455A64 (setup: device copies, matrices, batch size)
-  - `STREAMS_INIT` — 0x00796B (create compute/copy streams)
-  - `PINNED_POOL_INIT` — 0x303F9F (allocate pinned host buffers)
+  
   - `BATCH[b0:b1)` — 0xFF6F00 (per-batch envelope) containing:
     - `BATCH_PREP` (batch slicing, response prep)
     - `SVD` (batched rectangular SVD)
     - `LAMBDA_SELECT` (per-sample regularization search)
     - `RECONSTRUCTION_CALC` (DEM reconstruction + predictions)
-    - `DEVICE_TO_HOST` (D2H copies; may be async when streams enabled)
+  - `DEVICE_TO_HOST` (D2H copies)
 - MPI collectives (appear around data distribution/aggregation):
   - `MPI.Scatterv`
   - `MPI.Gatherv`

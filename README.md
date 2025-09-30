@@ -163,34 +163,29 @@ Environment toggles for hpc/slurm_run_multiGPU.sh (what they change):
   - `LOG_ROOT` (path): Host log root for rank logs and Nsight traces (default: `src/multiGPU/logs`).
   - `MAX_SAMPLES` (int): Reserved; currently not passed to the Python entry. Use `--max-samples` CLI if needed.
 
-- Profiling (Nsight Systems)
-  - `PROFILE` (0/1): Enable Nsight Systems collection inside container (`nsys profile …`).
+- Profiling
+  - `PROFILE` (0/1): Run under Nsight Systems (`nsys profile ...`) if available in the container.
+    - When `PROFILE=1` and `MULTIGPU_NVTX` is not explicitly set by you, the launcher automatically sets `MULTIGPU_NVTX=1` for rich timeline ranges.
   - `NSYS_OPTS` (csv): Nsight trace domains (default: `cuda,nvtx,osrt,cublas,cusolver`).
-  - `NSYS_OUT_DIR_HOST` (path): Host directory for `.nsys-rep` outputs (default: `$LOG_ROOT/nsys`).
+  - `NSYS_OUT_DIR_HOST` (path): Host directory for Nsight outputs (default: `$LOG_ROOT/nsys`).
   - `NSYS_TMP_DIR_HOST` (path): Host tmp dir for `.qdstrm` (default: `$LOG_ROOT/.nsys-tmp`).
+  - `PYPROFILE` (0/1): Use lightweight Python profiler (pyinstrument) instead of plain Python; writes `$LOG_ROOT/profile.html`.
 
 - Runtime behavior (MULTIGPU_*)
-  - `MULTIGPU_BATCH_SIZE` (int): 0 = auto (adaptive by free mem). >0 forces batch size.
-  - `MULTIGPU_NVTX` (0/1): Enable Python-level NVTX ranges (install `poetry install --with profiling`).
-  - `MULTIGPU_STREAMS` (0/1): Use CUDA streams + pinned host buffers for async D2H overlap (default 1).
-  - `MULTIGPU_STREAMS_DEPTH` (int): Ring buffer depth for pinned staging (default 2; try 2–3).
-  - `MULTIGPU_NO_FUSE` (0/1): Disable `cp.fuse()` paths for debug/determinism (default 0).
-  - `MULTIGPU_VERBOSE` (0/1): Extra verbose logging from kernels (default 0).
-  - `MULTIGPU_PREEMPT` (0/1): Register signal handlers to run a user callback and attempt an MPI barrier (default 0).
-  - `MULTIGPU_SAVE_COMPRESSED` (0/1): Save `dem_all_*.npz` with compression (default 0 = plain `.npz`).
+  - `MULTIGPU_BATCH_SIZE` (int): 0 = auto (adaptive by free GPU memory). >0 forces a fixed batch size.
+  - `MULTIGPU_NVTX` (0/1): Enable Python-level NVTX ranges inside the app (requires `poetry install --with profiling`).
+  - `MULTIGPU_VERBOSE` (0/1): Extra verbose logging (rank metrics, memory/batch info). Default 0.
   - `MULTIGPU_LOG_LEVEL` (str): Root log level (`INFO`, `WARNING`, …). Default `WARNING`.
-  - `MULTIGPU_QUIET` (0/1): If level is `WARNING+`, suppress per-rank files unless `MULTIGPU_RANK_FILES=1`.
+  - `MULTIGPU_QUIET` (0/1): When level is `WARNING+`, suppress per-rank files unless `MULTIGPU_RANK_FILES=1`. Default 1.
   - `MULTIGPU_RANK_FILES` (0/1): Force per-rank log files even in quiet mode.
-  - Reserved in script (currently unused by code): `MULTIGPU_STABLE_PINV`, `MULTIGPU_KEEP_DEVICE`, `MULTIGPU_VECTOR_DISABLE`.
+  - `MULTIGPU_PREEMPT` (0/1): Register preemption handlers (best-effort) when supported. Default 0.
+  - `MULTIGPU_SAVE_COMPRESSED` (0/1): Save outputs with compression. Default 0.
 
-- Communication and GPU networking
-  - `UCX_TLS` (csv): UCX transports; intra-node: `sm,self,cuda_copy,cuda_ipc,rc`.
-  - `UCX_NET_DEVICES` (str): Network device selection (default `all`).
-  - `NCCL_DEBUG` (str): `WARN` (default), `INFO` for debug.
-  - `NCCL_P2P_LEVEL` (str): Prefer `NVL` for NVLink within node.
-  - `NCCL_ASYNC_ERROR_HANDLING` (0/1): Keep at 1 to avoid silent hangs.
-  - `NCCL_IB_DISABLE`, `NCCL_SOCKET_IFNAME`, `NCCL_ALGO`, `NCCL_SHM_DISABLE`, `NCCL_COLLNET_ENABLE`, `NCCL_MIN_NCHANNELS`, `NCCL_MAX_NCHANNELS`: Advanced NCCL tuning; defaults are safe.
+- Communication and GPU networking (defaults are safe; advanced tuning optional)
+  - `NCCL_DEBUG` (str): `WARN` (default). Use `INFO` for troubleshooting.
+  - `NCCL_ASYNC_ERROR_HANDLING=1`: Enabled by default in the launcher to prevent silent hangs.
   - `CUDA_DEVICE_ORDER=PCI_BUS_ID`: Stable PCI ordering for consistent GPU selection.
+  - Advanced UCX/NCCL knobs (e.g., `UCX_TLS`, `UCX_NET_DEVICES`, `NCCL_P2P_LEVEL`, `NCCL_*`): tune only if you know your fabric; see launcher comments.
 
 - CuPy and diagnostics
   - `CUPY_CACHE_DIR` (path): Cache directory inside container (default `/workspace/.cupy_cache`).
@@ -201,6 +196,7 @@ Environment toggles for hpc/slurm_run_multiGPU.sh (what they change):
 Notes
 - All toggles can be passed via `sbatch --export=ALL,VAR=value,…` or set in the environment before submitting.
 - Outputs are written under `data/results_multiGPU/dem_all_<input>.npz`; Nsight traces go to `$LOG_ROOT/nsys/` when `PROFILE=1`.
+- In quiet mode (WARNING+), rank 0 still prints start/end markers and the pixels-per-rank distribution so you can track progress succinctly.
 
 **GPU jobs**
 Make sure your script contains:
@@ -247,12 +243,12 @@ Optional NVTX instrumentation is available for the multi-GPU path. Enable it to 
 
 ```bash
 poetry install --with profiling        # install optional nvtx dep
-export MULTIGPU_NVTX=1                 # turn on ranges
+export MULTIGPU_NVTX=1                 # turn on ranges (auto-enabled by launcher when PROFILE=1)
 nsys profile -t cuda,nvtx,osrt -o run \
   poetry run python -m src.multiGPU.main --input-dir data/np32 --max-samples 512
 ```
 
-See `docs/NVTX_PROFILING.md` for detailed guidance (phase list, Slurm usage, disabling, overhead notes).
+See `docs/NVTX_PROFILING.md` for detailed guidance (phase list, Slurm usage, disabling, overhead notes). The Slurm launcher auto-enables NVTX when `PROFILE=1` unless you explicitly set `MULTIGPU_NVTX`.
 
 ---
 

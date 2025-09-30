@@ -107,6 +107,32 @@ def verbose_enabled() -> bool:
         return False
 
 
+def _pinned_empty(shape, dtype):
+    """Allocate a NumPy array backed by CUDA pinned (page-locked) memory.
+
+    Uses cp.cuda.alloc_pinned_memory when available; falls back to
+    cp.cuda.PinnedMemory(size) on older CuPy versions. A reference to the
+    underlying allocation is attached to the array to prevent premature free.
+    """
+    n_elems = int(np.prod(shape))
+    nbytes = np.dtype(dtype).itemsize * n_elems
+    mem = None
+    try:
+        # Preferred on modern CuPy
+        mem = cp.cuda.alloc_pinned_memory(int(nbytes))
+    except Exception:
+        # Fallback for older CuPy APIs
+        try:
+            mem = cp.cuda.PinnedMemory(int(nbytes))  # type: ignore[attr-defined]
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError(f"Failed to allocate pinned host memory: {exc}")
+    arr = np.frombuffer(mem, dtype=dtype, count=n_elems).reshape(tuple(shape))
+    # NumPy keeps a reference to the backing buffer object (mem) internally
+    # via arr.base, so no extra attribute is necessary (and ndarray doesn't
+    # allow setting arbitrary attributes on some NumPy versions).
+    return arr
+
+
 def estimate_batch_plan(na: int, nf: int, nt: int, nmu: int) -> Dict[str, Any]:
     """Provide a batch sizing and memory usage estimate.
 
@@ -376,6 +402,8 @@ def demmap_pos(
         if dem_norm0.ndim == 1:
             dem_norm0 = np.broadcast_to(dem_norm0[None, :], (na, nt)).copy()
 
+    # Output arrays (initialized as standard NumPy; replaced with pinned buffers
+    # inside the GPU path once a device is confirmed.)
     dem = np.zeros((na, nt), dtype=np.float64)
     edem = np.zeros((na, nt), dtype=np.float64)
     elogt = np.zeros((na, nt), dtype=np.float64)
@@ -436,9 +464,21 @@ def demmap_pos(
                 str(int(free_b)) if free_b is not None else "<n/a>",
                 str(int(total_b)) if total_b is not None else "<n/a>",
             )
+        # Replace outputs with pinned (page-locked) host memory to enable fully
+        # asynchronous D2H enqueues. Allocate lazily to avoid importing helpers
+        # in CPU-only environments.
+        dem = _pinned_empty((na, nt), np.float64)
+        edem = _pinned_empty((na, nt), np.float64)
+        elogt = _pinned_empty((na, nt), np.float64)
+        chisq = _pinned_empty((na,), np.float64)
+        dn_reg = _pinned_empty((na, nf), np.float64)
 
-        # Device constants
+        # Streams and device constants
         with nvtx_range("DEM_DEVICE_CONSTS", color=0x00796B):
+            # Create distinct streams for compute and D2H copies (non-blocking)
+            compute_stream = cp.cuda.Stream(non_blocking=True)
+            copy_stream = cp.cuda.Stream(non_blocking=True)
+
             rmatrix_d = cp.asarray(rmatrix)
             dlogt_d = cp.asarray(dlogt)
             b0_inv_vec = cp.sqrt(dlogt_d)
@@ -483,6 +523,24 @@ def demmap_pos(
         cur_batch = batch_size
         completed_gpu = True
         oom_retries = 0
+
+        # Small ring to retain device arrays until their async D2H completes
+        RING = 3
+        ring = [
+            {"in_use": False, "done_evt": None, "keep": None} for _ in range(RING)
+        ]
+
+        def _sync_and_clear_slot(i: int):
+            slot = ring[i]
+            if slot["in_use"] and slot["done_evt"] is not None:
+                # Wait for copy to finish before releasing references
+                try:
+                    slot["done_evt"].synchronize()
+                except Exception:
+                    pass
+            # Drop references so the memory pool can reclaim
+            ring[i] = {"in_use": False, "done_evt": None, "keep": None}
+
         while idx < na:
             attempt = min(cur_batch, na - idx)
             try:
@@ -491,12 +549,13 @@ def demmap_pos(
                 cur = attempt
                 with nvtx_range(f"BATCH[{b0}:{b1})", color=0xFF6F00):
                     with nvtx_range("BATCH_PREP", color=0x8E24AA):
-                        dn_b = cp.asarray(dd[b0:b1, :])
-                        ed_b = cp.asarray(ed[b0:b1, :])
+                        with compute_stream:
+                            dn_b = cp.asarray(dd[b0:b1, :])
+                            ed_b = cp.asarray(ed[b0:b1, :])
 
-                        rmatrixin_b = rmatrix_d[None, :, :] * (1.0 / ed_b)[:, None, :]
-                        A_b = cp.transpose(rmatrixin_b, (0, 2, 1))
-                        dprime_b = dn_b / ed_b
+                            rmatrixin_b = rmatrix_d[None, :, :] * (1.0 / ed_b)[:, None, :]
+                            A_b = cp.transpose(rmatrixin_b, (0, 2, 1))
+                            dprime_b = dn_b / ed_b
 
                     use_gloci = bool(np.sum(glc > 0) > 0)
                     if use_gloci:
@@ -510,134 +569,204 @@ def demmap_pos(
                             wraw_b = cp.min(em, axis=2)
                     else:
                         with nvtx_range("L0_PASS", color=0x5E35B1):
-                            AB10 = A_b * b0_inv_vec[None, None, :]
-                            U0, s0, Vh0 = cp.linalg.svd(AB10, full_matrices=False)
-                            coef0 = cp.matmul(
-                                cp.transpose(U0, (0, 2, 1)), dprime_b[:, :, None]
-                            ).squeeze(-1)
-                            eps = cp.finfo(cp.float64).tiny
-                            s_safe0 = cp.maximum(s0, eps)
-                            minx0 = cp.maximum(
-                                (cp.min(s_safe0, axis=1) ** 2) * 1e-4,
-                                cp.array(1e-300),
-                            )
-                            maxx0 = cp.max(s_safe0, axis=1)
-                            maxx0 = cp.where(maxx0 > minx0, maxx0, minx0 * 10.0)
-                            mu0 = cp.exp(
-                                cp.log(minx0)[:, None]
-                                + (cp.log(maxx0) - cp.log(minx0))[:, None]
-                                * tlin[None, :]
-                            )
-                            s2 = s0**2
-                            vals0 = (
-                                mu0[:, None, :] / (s2[:, :, None] + mu0[:, None, :])
-                            ) * coef0[:, :, None]
-                            arg_sum0 = cp.sum(vals0**2, axis=1)
-                            err_sq = cp.sum(ed_b**2, axis=1)
-                            discr0 = arg_sum0 - (err_sq * float(reg_tweak))[:, None]
-                            idx0 = cp.argmin(cp.abs(discr0), axis=1)
-                            lamb0 = mu0[cp.arange(cur), idx0]
-                            V0 = cp.transpose(Vh0, (0, 2, 1))
-                            filt0 = s0 / (s0**2 + lamb0[:, None])
-                            xprime0 = cp.matmul(
-                                V0, (filt0 * coef0)[:, :, None]
-                            ).squeeze(-1)
-                            dem0 = b0_inv_vec[None, :] * xprime0
-                            fcofmax = 1e-4
-                            mx = cp.max(dem0, axis=1, keepdims=True)
-                            mask = (dem0 > 0) & (dem0 > (fcofmax * mx))
-                            wraw_b = cp.where(mask, dem0, cp.ones_like(dem0))
+                            with compute_stream:
+                                AB10 = A_b * b0_inv_vec[None, None, :]
+                                U0, s0, Vh0 = cp.linalg.svd(AB10, full_matrices=False)
+                                coef0 = cp.matmul(
+                                    cp.transpose(U0, (0, 2, 1)), dprime_b[:, :, None]
+                                ).squeeze(-1)
+                                eps = cp.finfo(cp.float64).tiny
+                                s_safe0 = cp.maximum(s0, eps)
+                                minx0 = cp.maximum(
+                                    (cp.min(s_safe0, axis=1) ** 2) * 1e-4,
+                                    cp.array(1e-300),
+                                )
+                                maxx0 = cp.max(s_safe0, axis=1)
+                                maxx0 = cp.where(maxx0 > minx0, maxx0, minx0 * 10.0)
+                                mu0 = cp.exp(
+                                    cp.log(minx0)[:, None]
+                                    + (cp.log(maxx0) - cp.log(minx0))[:, None]
+                                    * tlin[None, :]
+                                )
+                                s2 = s0**2
+                                vals0 = (
+                                    mu0[:, None, :] / (s2[:, :, None] + mu0[:, None, :])
+                                ) * coef0[:, :, None]
+                                arg_sum0 = cp.sum(vals0**2, axis=1)
+                                err_sq = cp.sum(ed_b**2, axis=1)
+                                discr0 = arg_sum0 - (err_sq * float(reg_tweak))[:, None]
+                                idx0 = cp.argmin(cp.abs(discr0), axis=1)
+                                lamb0 = mu0[cp.arange(cur), idx0]
+                                V0 = cp.transpose(Vh0, (0, 2, 1))
+                                filt0 = s0 / (s0**2 + lamb0[:, None])
+                                xprime0 = cp.matmul(
+                                    V0, (filt0 * coef0)[:, :, None]
+                                ).squeeze(-1)
+                                dem0 = b0_inv_vec[None, :] * xprime0
+                                fcofmax = 1e-4
+                                mx = cp.max(dem0, axis=1, keepdims=True)
+                                mask = (dem0 > 0) & (dem0 > (fcofmax * mx))
+                                wraw_b = cp.where(mask, dem0, cp.ones_like(dem0))
 
                     with nvtx_range("SMOOTH_WEIGHTS", color=0x303F9F):
-                        weights_b = _smooth_and_clamp(wraw_b)
-                        if l_emd:
-                            bvec = cp.abs(weights_b)
-                        else:
-                            bvec = (
-                                cp.sqrt(cp.abs(weights_b)) / cp.sqrt(dlogt_d)[None, :]
-                            )
+                        with compute_stream:
+                            weights_b = _smooth_and_clamp(wraw_b)
+                            if l_emd:
+                                bvec = cp.abs(weights_b)
+                            else:
+                                bvec = (
+                                    cp.sqrt(cp.abs(weights_b)) / cp.sqrt(dlogt_d)[None, :]
+                                )
 
                     with nvtx_range("SVD_MAIN", color=0x1E88E5):
-                        AB1 = A_b * bvec[:, None, :]
-                        U, s, Vh = cp.linalg.svd(AB1, full_matrices=False)
-                        V = cp.transpose(Vh, (0, 2, 1))
-                        s_safe = cp.maximum(s, cp.finfo(cp.float64).tiny)
-                        minx = cp.maximum(
-                            (cp.min(s_safe, axis=1) ** 2) * 1e-4, cp.array(1e-300)
-                        )
-                        maxx = cp.max(s_safe, axis=1)
-                        maxx = cp.where(maxx > minx, maxx, minx * 10.0)
-                        mu_b = cp.exp(
-                            cp.log(minx)[:, None]
-                            + (cp.log(maxx) - cp.log(minx))[:, None] * tlin[None, :]
-                        )
-                        coef = cp.matmul(
-                            cp.transpose(U, (0, 2, 1)), dprime_b[:, :, None]
-                        ).squeeze(-1)
-                        err_sq = cp.sum(ed_b**2, axis=1)
+                        with compute_stream:
+                            AB1 = A_b * bvec[:, None, :]
+                            U, s, Vh = cp.linalg.svd(AB1, full_matrices=False)
+                            V = cp.transpose(Vh, (0, 2, 1))
+                            s_safe = cp.maximum(s, cp.finfo(cp.float64).tiny)
+                            minx = cp.maximum(
+                                (cp.min(s_safe, axis=1) ** 2) * 1e-4, cp.array(1e-300)
+                            )
+                            maxx = cp.max(s_safe, axis=1)
+                            maxx = cp.where(maxx > minx, maxx, minx * 10.0)
+                            mu_b = cp.exp(
+                                cp.log(minx)[:, None]
+                                + (cp.log(maxx) - cp.log(minx))[:, None] * tlin[None, :]
+                            )
+                            coef = cp.matmul(
+                                cp.transpose(U, (0, 2, 1)), dprime_b[:, :, None]
+                            ).squeeze(-1)
+                            err_sq = cp.sum(ed_b**2, axis=1)
 
                     with nvtx_range("LAMBDA_SELECT", color=0x3949AB):
-                        reg_vec = cp.full((cur,), float(reg_tweak), dtype=cp.float64)
-                        for _it in range(int(max_iter)):
-                            vals = (
-                                mu_b[:, None, :]
-                                / (s_safe[:, :, None] ** 2 + mu_b[:, None, :])
-                            ) * coef[:, :, None]
-                            arg_sum = cp.sum(vals**2, axis=1)
-                            discr = arg_sum - (err_sq * reg_vec)[:, None]
-                            idx_mu = cp.argmin(cp.abs(discr), axis=1)
-                            lamb = mu_b[cp.arange(cur), idx_mu]
-                            filt = s / (s**2 + lamb[:, None])
-                            xprime = cp.matmul(V, (filt * coef)[:, :, None]).squeeze(-1)
-                            dem_out = bvec * xprime
-                            dn_pred = cp.matmul(dem_out, rmatrix_d)
-                            resid = (dn_b - dn_pred) / ed_b
-                            chisq_b = cp.sum(resid**2, axis=1) / nf
-                            neg_mask = cp.any(dem_out < 0, axis=1)
-                            if not bool(cp.any(neg_mask)):
-                                break
-                            reg_vec = cp.where(
-                                neg_mask, reg_vec * float(rgt_fact), reg_vec
-                            )
+                        with compute_stream:
+                            reg_vec = cp.full((cur,), float(reg_tweak), dtype=cp.float64)
+                            for _it in range(int(max_iter)):
+                                vals = (
+                                    mu_b[:, None, :]
+                                    / (s_safe[:, :, None] ** 2 + mu_b[:, None, :])
+                                ) * coef[:, :, None]
+                                arg_sum = cp.sum(vals**2, axis=1)
+                                discr = arg_sum - (err_sq * reg_vec)[:, None]
+                                idx_mu = cp.argmin(cp.abs(discr), axis=1)
+                                lamb = mu_b[cp.arange(cur), idx_mu]
+                                filt = s / (s**2 + lamb[:, None])
+                                xprime = cp.matmul(V, (filt * coef)[:, :, None]).squeeze(-1)
+                                dem_out = bvec * xprime
+                                dn_pred = cp.matmul(dem_out, rmatrix_d)
+                                resid = (dn_b - dn_pred) / ed_b
+                                chisq_b = cp.sum(resid**2, axis=1) / nf
+                                neg_mask = cp.any(dem_out < 0, axis=1)
+                                if not bool(cp.any(neg_mask)):
+                                    break
+                                reg_vec = cp.where(
+                                    neg_mask, reg_vec * float(rgt_fact), reg_vec
+                                )
 
                     with nvtx_range("EDEM_ELOGT", color=0x6D4C41):
-                        kVT = V * filt[:, None, :]
-                        kdag = cp.matmul(kVT, cp.transpose(U, (0, 2, 1)))
-                        kdag = bvec[:, :, None] * kdag
-                        edem_b = cp.sqrt(cp.sum(kdag**2, axis=2))
+                        with compute_stream:
+                            kVT = V * filt[:, None, :]
+                            kdag = cp.matmul(kVT, cp.transpose(U, (0, 2, 1)))
+                            kdag = bvec[:, :, None] * kdag
+                            edem_b = cp.sqrt(cp.sum(kdag**2, axis=2))
 
-                        kdagk = cp.matmul(kdag, cp.transpose(rmatrixin_b, (0, 2, 1)))
-                        j = seg_idx_d
-                        left = kdagk[:, :, j]
-                        right = kdagk[:, :, j + 1]
-                        rr = left + (right - left) * t_frac_d
-                        thr = cp.max(kdagk, axis=1) / 2.0
-                        hm = rr >= thr[:, :, None]
-                        hm_int = hm.astype(cp.int8)
-                        first = cp.argmax(hm_int, axis=2)
-                        last = (hm.shape[2] - 1) - cp.argmax(hm_int[:, :, ::-1], axis=2)
-                        has_any = cp.any(hm, axis=2)
-                        width = (ltt_d[last] - ltt_d[first]) / 2.0
-                        elogt_b = cp.where(has_any, width, dlogt_d[None, :])
+                            kdagk = cp.matmul(kdag, cp.transpose(rmatrixin_b, (0, 2, 1)))
+                            j = seg_idx_d
+                            left = kdagk[:, :, j]
+                            right = kdagk[:, :, j + 1]
+                            rr = left + (right - left) * t_frac_d
+                            thr = cp.max(kdagk, axis=1) / 2.0
+                            hm = rr >= thr[:, :, None]
+                            hm_int = hm.astype(cp.int8)
+                            first = cp.argmax(hm_int, axis=2)
+                            last = (hm.shape[2] - 1) - cp.argmax(hm_int[:, :, ::-1], axis=2)
+                            has_any = cp.any(hm, axis=2)
+                            width = (ltt_d[last] - ltt_d[first]) / 2.0
+                            elogt_b = cp.where(has_any, width, dlogt_d[None, :])
 
                     if rscl:
                         with nvtx_range("RSCL_ADJUST", color=0x8D6E63):
-                            mnrat = cp.mean(dn_b / cp.maximum(dn_pred, 1e-300), axis=1)
-                            dem_out = dem_out * mnrat[:, None]
-                            edem_b = edem_b * mnrat[:, None]
-                            dn_pred = cp.matmul(dem_out, rmatrix_d)
-                            resid = (dn_b - dn_pred) / ed_b
-                            chisq_b = cp.sum(resid**2, axis=1) / nf
+                            with compute_stream:
+                                mnrat = cp.mean(dn_b / cp.maximum(dn_pred, 1e-300), axis=1)
+                                dem_out = dem_out * mnrat[:, None]
+                                edem_b = edem_b * mnrat[:, None]
+                                dn_pred = cp.matmul(dem_out, rmatrix_d)
+                                resid = (dn_b - dn_pred) / ed_b
+                                chisq_b = cp.sum(resid**2, axis=1) / nf
+                    # Enqueue async D2H on a dedicated stream, overlapping next compute
+                    with nvtx_range("DEVICE_TO_HOST_ASYNC", color=0x795548):
+                        # Ensure previous user of this ring slot is done, then reuse
+                        slot_id = (b0 // max(1, cur_batch)) % RING
+                        _sync_and_clear_slot(slot_id)
 
-                    with nvtx_range("DEVICE_TO_HOST", color=0x795548):
-                        dem[b0:b1, :] = cp.asnumpy(dem_out)
-                        edem[b0:b1, :] = cp.asnumpy(edem_b)
-                        elogt[b0:b1, :] = cp.asnumpy(elogt_b)
-                        chisq[b0:b1] = cp.asnumpy(chisq_b)
-                        dn_reg[b0:b1, :] = cp.asnumpy(dn_pred)
+                        # Record when this batch's results are ready on compute stream
+                        ready_evt = cp.cuda.Event()
+                        ready_evt.record(compute_stream)
+
+                        # Compute destination pointers for slices in pinned arrays
+                        dem_dst = dem[b0:b1, :]
+                        edem_dst = edem[b0:b1, :]
+                        elogt_dst = elogt[b0:b1, :]
+                        chisq_dst = chisq[b0:b1]
+                        dn_reg_dst = dn_reg[b0:b1, :]
+
+                        # Wait for compute to finish, then schedule memcpys on copy stream
+                        copy_stream.wait_event(ready_evt)
+                        # Support both CuPy constant names across versions
+                        try:
+                            kind = cp.cuda.runtime.memcpyDeviceToHost  # type: ignore[attr-defined]
+                        except AttributeError:  # pragma: no cover - older CuPy
+                            kind = cp.cuda.runtime.cudaMemcpyDeviceToHost  # type: ignore[attr-defined]
+                        elsize = np.dtype(np.float64).itemsize
+
+                        cp.cuda.runtime.memcpyAsync(
+                            dem_dst.ctypes.data,
+                            dem_out.data.ptr,
+                            int(dem_out.size) * elsize,
+                            kind,
+                            copy_stream.ptr,
+                        )
+                        cp.cuda.runtime.memcpyAsync(
+                            edem_dst.ctypes.data,
+                            edem_b.data.ptr,
+                            int(edem_b.size) * elsize,
+                            kind,
+                            copy_stream.ptr,
+                        )
+                        cp.cuda.runtime.memcpyAsync(
+                            elogt_dst.ctypes.data,
+                            elogt_b.data.ptr,
+                            int(elogt_b.size) * elsize,
+                            kind,
+                            copy_stream.ptr,
+                        )
+                        cp.cuda.runtime.memcpyAsync(
+                            chisq_dst.ctypes.data,
+                            chisq_b.data.ptr,
+                            int(chisq_b.size) * elsize,
+                            kind,
+                            copy_stream.ptr,
+                        )
+                        cp.cuda.runtime.memcpyAsync(
+                            dn_reg_dst.ctypes.data,
+                            dn_pred.data.ptr,
+                            int(dn_pred.size) * elsize,
+                            kind,
+                            copy_stream.ptr,
+                        )
+
+                        # Mark copy completion for this slot and retain device refs until then
+                        done_evt = cp.cuda.Event()
+                        done_evt.record(copy_stream)
+                        ring[slot_id] = {
+                            "in_use": True,
+                            "done_evt": done_evt,
+                            "keep": (dem_out, edem_b, elogt_b, chisq_b, dn_pred),
+                        }
 
                 idx = b1
                 cur_batch = attempt
+                # Free any immediately reclaimable device memory (safe: we hold refs)
                 cp.get_default_memory_pool().free_all_blocks()
             except cp.cuda.memory.OutOfMemoryError:
                 with nvtx_range("OOM_RETRY", color=0xD32F2F):
@@ -651,7 +780,7 @@ def demmap_pos(
                         completed_gpu = False
                         break
                     if verbose_enabled():
-                        logging.getLogger(__name__).info(
+                        logging.getLogger(__name__).warning(
                             "[metrics] OOM: reducing batch %d -> %d",
                             int(attempt),
                             int(attempt2),
@@ -659,6 +788,10 @@ def demmap_pos(
                     oom_retries += 1
                     cur_batch = attempt2
                     continue
+
+        # Drain outstanding async copies before returning
+        for i in range(RING):
+            _sync_and_clear_slot(i)
 
         if completed_gpu:
             if verbose_enabled():

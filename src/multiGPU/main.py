@@ -10,6 +10,9 @@ High-level flow
 
 from __future__ import annotations
 
+# pylint: disable=line-too-long
+# flake8: noqa: E501
+
 import argparse
 import logging
 import numpy as np
@@ -124,7 +127,9 @@ def main():
 
     if rank == 0:
         log.info(
-            "Processing %d input files across %d ranks" % (len(all_inputs), size),
+            "Processing %d input files across %d ranks",
+            len(all_inputs),
+            size,
             extra={"general": True},
         )
 
@@ -132,9 +137,12 @@ def main():
     for input_path in all_inputs:
         file_label = f"PROCESS_FILE:{os.path.basename(input_path)}"
         with nvtx_range(file_label, color=0xFF9800):
+            t_img_start = time.perf_counter()
             if rank == 0:
                 log.info(
-                    f"Starting processing input {input_path}", extra={"general": True}
+                    "Starting processing input %s",
+                    os.path.basename(input_path),
+                    extra={"general": True},
                 )
             try:
                 # Prepare data on rank 0
@@ -221,6 +229,20 @@ def main():
                     local_dn = dn2d
                     local_edn = edn2d
                     counts = [local_dn.shape[0]]
+                
+                # Rank 0: announce pixel distribution so it appears in Slurm .out
+                if rank == 0:
+                    try:
+                        total_px = int(np.sum(counts)) if counts is not None else 0
+                        log.info(
+                            "Pixels per rank (total=%d): %s",
+                            total_px,
+                            counts,
+                            extra={"general": True},
+                        )
+                    except Exception:
+                        # best-effort; avoid failing the run on logging
+                        pass
 
                 # Build simple response matrix (nt x nf)
                 nf = local_dn.shape[1]
@@ -322,9 +344,19 @@ def main():
                         str(compress),
                         dt,
                     )
+                    # Log total image processing duration
+                    t_img = time.perf_counter() - t_img_start
+                    # Emit a concise finished marker for Slurm .out
+                    log.info(
+                        f"Finished processing input {os.path.basename(input_path)} in {t_img:.2f}s",
+                        extra={"general": True},
+                    )
             except Exception as e:
                 log.exception(
-                    "Rank %d: exception while processing %s: %s", rank, input_path, e
+                    "Rank %d: exception while processing %s: %s",
+                    rank,
+                    input_path,
+                    e,
                 )
                 raise
 
@@ -334,7 +366,9 @@ def main():
             try:
                 mmpi.barrier(comm)
             except Exception as e:
-                logging.getLogger(__name__).warning("Final MPI barrier failed: %s", e)
+                logging.getLogger(__name__).warning(
+                    "Final MPI barrier failed: %s", e
+                )
 
     # Clean shutdown of logging
     with nvtx_range("SHUTDOWN", color=0x9E9E9E):
