@@ -27,17 +27,21 @@ def nvtx_range(msg: str, color: int | None = None):
     if os.environ.get("MULTIGPU_NVTX", "0") != "1":
         yield
         return
+    cm = None
     try:
         import nvtx as _nvtx  # type: ignore
 
         kwargs = {"message": msg}
         if color is not None:
             kwargs["color"] = int(color)
-        with _nvtx.annotate(**kwargs):
-            yield
+        cm = _nvtx.annotate(**kwargs)
     except Exception:
-        # degrade silently
+        cm = None  # degrade silently
+    if cm is None:
         yield
+    else:
+        with cm:
+            yield
 
 
 try:
@@ -50,21 +54,40 @@ except Exception as e:  # pragma: no cover
 
 
 def _bytes_per_sample_estimate(nf: int, nt: int, nmu: int) -> int:
-    """Estimate bytes per sample used by the batched solver.
+    """Estimate peak bytes per sample used by the batched solver (Float64).
 
-    Matches the heuristic used for batch sizing. Float64 assumed.
+    This is an intentionally conservative estimate designed to reduce
+    OOM-induced batch resizes. It accounts for the largest simultaneously
+    live arrays in both the self-normalized L pass and the main SVD pass,
+    as well as dominant intermediates used in uncertainty and elogt paths.
 
     Args:
         nf: Number of filters (channels).
         nt: Number of temperature bins.
-        nmu: Number of lambda grid points.
+        nmu: Number of lambda grid points in the discrepancy search.
 
     Returns:
-        Estimated bytes per sample as an integer.
+        Estimated peak bytes per sample as an integer.
     """
     k = min(nf, nt)
-    # Back-of-the-envelope per-sample bytes (see _adaptive_batch_size)
-    return int(8 * ((nf * nt) + (nf * k) + k + (k * nt) + (2 * k * max(nmu, 2)) + 64))
+    nmu_eff = max(int(nmu), 2)
+
+    # Core matrices per sample (dominant):
+    # - A_b: (nf, nt)
+    # - SVD outputs for two passes (L0 + main): U(nf,k), s(k), Vh(k,nt)
+    # - Discrepancy intermediates: (k * nmu)
+    # - kdagk for elogt width proxy: (nt, nf)
+    core_terms = (
+        (nf * nt)  # A_b
+        + 2 * (nf * k + k + k * nt)  # two SVDs worth of (U, s, Vh)
+        + 2 * (k * nmu_eff)  # discrepancy vals for two passes (approx)
+        + (nt * nf)  # kdagk dominant slice used for elogt
+    )
+    # Inputs/outputs per sample (amortized) and safety margin
+    io_terms = nf + nf + nt + nt + nt  # dn, ed, dem, edem, elogt
+    safety = 1.35  # cover allocator/workspace and transient temporaries
+    bytes_f64 = 8.0
+    return int(bytes_f64 * safety * (core_terms + io_terms + 64))
 
 
 def _adaptive_batch_size(na: int, nf: int, nt: int, nmu: int) -> int:
@@ -90,7 +113,8 @@ def _adaptive_batch_size(na: int, nf: int, nt: int, nmu: int) -> int:
         bytes_per = _bytes_per_sample_estimate(nf, nt, nmu)
         if bytes_per <= 0:
             return default
-        est = int((free_b * 0.7) // bytes_per)
+        # Be conservative to avoid OOM during SVD workspace spikes
+        est = int((free_b * 0.55) // bytes_per)
         return max(1, min(est, na))
     except Exception:
         return default
@@ -340,20 +364,19 @@ def demmap_pos(
 ):
     """Reconstruct Differential Emission Measure (DEM) for many samples.
 
-    This function mirrors the vendor baseline exactly (GSVD parity via
-    an SVD-of-AB1 construction) while accelerating batched cases on GPU.
+    This function mirrors the vendor baseline (GSVD parity via an
+    SVD-of-AB1 construction) while accelerating batched cases on GPU.
     It includes a self-normalized L pass when ``dem_norm0`` is trivial,
     optional GLOCI-based weighting, Morozov discrepancy selection for the
     regularization parameter, a positivity loop, and vendor-aligned
-        computations for ``edem`` and ``elogt``.
+    computations for ``edem`` and ``elogt``.
 
         GPU requirements and error behavior:
         - If no CUDA device is available (``cp.cuda.runtime.getDeviceCount() == 0``),
             this function raises ``RuntimeError``. This module is GPU-only by design.
         - If GPU memory is insufficient for the current batch, the batch size is
-            automatically reduced and retried. If a single-sample batch still
-            fails due to OOM, the function falls back to a CPU per-sample parity
-            path for the remaining samples on that run.
+            automatically reduced and retried. If retries are exhausted, a
+            ``RuntimeError`` is raised with guidance to reduce the batch size.
 
     Args:
       dd: Data array of shape (na, nf) with measured intensities.
@@ -402,6 +425,16 @@ def demmap_pos(
         if dem_norm0.ndim == 1:
             dem_norm0 = np.broadcast_to(dem_norm0[None, :], (na, nt)).copy()
 
+    # Early out: nothing to do for empty batches. Do not require CUDA.
+    if na == 0:
+        return (
+            np.zeros((0, nt), dtype=np.float64),
+            np.zeros((0, nt), dtype=np.float64),
+            np.zeros((0, nt), dtype=np.float64),
+            np.zeros((0,), dtype=np.float64),
+            np.zeros((0, nf), dtype=np.float64),
+        )
+
     # Output arrays (initialized as standard NumPy; replaced with pinned buffers
     # inside the GPU path once a device is confirmed.)
     dem = np.zeros((na, nt), dtype=np.float64)
@@ -436,7 +469,34 @@ def demmap_pos(
         )
 
     if _have_cuda_devices():
-        # Batch size heuristic with optional override
+        # Replace outputs with pinned (page-locked) host memory to enable fully
+        # asynchronous D2H enqueues. Allocate lazily to avoid importing helpers
+        # in CPU-only environments.
+        dem = _pinned_empty((na, nt), np.float64)
+        edem = _pinned_empty((na, nt), np.float64)
+        elogt = _pinned_empty((na, nt), np.float64)
+        chisq = _pinned_empty((na,), np.float64)
+        dn_reg = _pinned_empty((na, nf), np.float64)
+
+        # Streams and device constants (allocate first, then size the batch)
+        with nvtx_range("DEM_DEVICE_CONSTS", color=0x00796B):
+            # Create distinct streams for H2D staging, compute, and D2H copies (non-blocking)
+            compute_stream = cp.cuda.Stream(non_blocking=True)
+            copy_stream = cp.cuda.Stream(non_blocking=True)
+            h2d_stream = cp.cuda.Stream(non_blocking=True)
+
+            rmatrix_d = cp.asarray(rmatrix)
+            dlogt_d = cp.asarray(dlogt)
+            b0_inv_vec = cp.sqrt(dlogt_d)
+            # Interpolation helpers on device
+            ltt_d = cp.asarray(ltt)
+            seg_idx = np.clip(np.searchsorted(logt, ltt, side="right") - 1, 0, nt - 2)
+            seg_idx_d = cp.asarray(seg_idx)
+            seg_left = logt[seg_idx]
+            seg_right = logt[seg_idx + 1]
+            t_frac_d = cp.asarray((ltt - seg_left) / (seg_right - seg_left + 1e-300))
+
+        # Batch size heuristic with optional override, computed after constants
         try:
             env_bs = int(os.environ.get("MULTIGPU_BATCH_SIZE", "0"))
         except Exception:
@@ -464,31 +524,48 @@ def demmap_pos(
                 str(int(free_b)) if free_b is not None else "<n/a>",
                 str(int(total_b)) if total_b is not None else "<n/a>",
             )
-        # Replace outputs with pinned (page-locked) host memory to enable fully
-        # asynchronous D2H enqueues. Allocate lazily to avoid importing helpers
-        # in CPU-only environments.
-        dem = _pinned_empty((na, nt), np.float64)
-        edem = _pinned_empty((na, nt), np.float64)
-        elogt = _pinned_empty((na, nt), np.float64)
-        chisq = _pinned_empty((na,), np.float64)
-        dn_reg = _pinned_empty((na, nf), np.float64)
 
-        # Streams and device constants
-        with nvtx_range("DEM_DEVICE_CONSTS", color=0x00796B):
-            # Create distinct streams for compute and D2H copies (non-blocking)
-            compute_stream = cp.cuda.Stream(non_blocking=True)
-            copy_stream = cp.cuda.Stream(non_blocking=True)
-
-            rmatrix_d = cp.asarray(rmatrix)
-            dlogt_d = cp.asarray(dlogt)
-            b0_inv_vec = cp.sqrt(dlogt_d)
-            # Interpolation helpers on device
-            ltt_d = cp.asarray(ltt)
-            seg_idx = np.clip(np.searchsorted(logt, ltt, side="right") - 1, 0, nt - 2)
-            seg_idx_d = cp.asarray(seg_idx)
-            seg_left = logt[seg_idx]
-            seg_right = logt[seg_idx + 1]
-            t_frac_d = cp.asarray((ltt - seg_left) / (seg_right - seg_left + 1e-300))
+        # Preallocate ping-pong device input buffers and events for triple buffering
+        # Use a retry loop that recomputes a stable batch size from current free memory
+        with nvtx_range("DEM_DEVICE_IO", color=0x00796B):
+            while True:
+                try:
+                    dn_dev = [
+                        cp.empty((int(batch_size), int(nf)), dtype=cp.float64)
+                        for _ in range(2)
+                    ]
+                    ed_dev = [
+                        cp.empty((int(batch_size), int(nf)), dtype=cp.float64)
+                        for _ in range(2)
+                    ]
+                    break
+                except cp.cuda.memory.OutOfMemoryError:
+                    try:
+                        cp.get_default_memory_pool().free_all_blocks()
+                        cp.get_default_pinned_memory_pool().free_all_blocks()
+                    except Exception:
+                        pass
+                    # Re-estimate batch size based on current free memory
+                    try:
+                        free_b3, _ = cp.cuda.runtime.memGetInfo()  # type: ignore[attr-defined]
+                        bps3 = _bytes_per_sample_estimate(nf, nt, nmu)
+                        est3 = int((free_b3 * 0.5) // max(1, bps3))
+                        new_bs = max(1, min(est3, na))
+                    except Exception:
+                        new_bs = max(1, batch_size // 2)
+                    if new_bs >= batch_size and batch_size > 1:
+                        new_bs = max(1, batch_size // 2)
+                    if verbose_enabled():
+                        logging.getLogger(__name__).warning(
+                            "[metrics] OOM during IO alloc: batch_size %d -> %d",
+                            int(batch_size),
+                            int(new_bs),
+                        )
+                    if new_bs == batch_size == 1:
+                        # Give up; the problem doesn't fit even with bs=1
+                        raise
+                    batch_size = new_bs
+            h2d_ready = [cp.cuda.Event() for _ in range(2)]
 
         # Common mu linspace used for both self-normalized and main passes
         nmu_eff = int(max(int(nmu), 2))
@@ -526,9 +603,7 @@ def demmap_pos(
 
         # Small ring to retain device arrays until their async D2H completes
         RING = 3
-        ring = [
-            {"in_use": False, "done_evt": None, "keep": None} for _ in range(RING)
-        ]
+        ring = [{"in_use": False, "done_evt": None, "keep": None} for _ in range(RING)]
 
         def _sync_and_clear_slot(i: int):
             slot = ring[i]
@@ -541,6 +616,41 @@ def demmap_pos(
             # Drop references so the memory pool can reclaim
             ring[i] = {"in_use": False, "done_evt": None, "keep": None}
 
+        # Helper: stage host slices (dd, ed) to a ping-pong slot on h2d_stream
+        def _stage_h2d(b0: int, cur: int, slot: int):
+            with nvtx_range("H2D_STAGE", color=0x0077CC):
+                # Destination device slices
+                dn_dst = dn_dev[slot][:cur, :]
+                ed_dst = ed_dev[slot][:cur, :]
+                # memcpy kind symbol across CuPy versions
+                try:
+                    kind_h2d = cp.cuda.runtime.memcpyHostToDevice  # type: ignore[attr-defined]
+                except AttributeError:  # pragma: no cover
+                    kind_h2d = cp.cuda.runtime.cudaMemcpyHostToDevice  # type: ignore[attr-defined]
+                elsize = np.dtype(np.float64).itemsize
+                with h2d_stream:
+                    h_dn = dd[b0 : b0 + cur, :]
+                    h_ed = ed[b0 : b0 + cur, :]
+                    cp.cuda.runtime.memcpyAsync(
+                        dn_dst.data.ptr,
+                        h_dn.ctypes.data,
+                        int(dn_dst.size) * elsize,
+                        kind_h2d,
+                        h2d_stream.ptr,
+                    )
+                    cp.cuda.runtime.memcpyAsync(
+                        ed_dst.data.ptr,
+                        h_ed.ctypes.data,
+                        int(ed_dst.size) * elsize,
+                        kind_h2d,
+                        h2d_stream.ptr,
+                    )
+                    h2d_ready[slot].record(h2d_stream)
+
+        # Pipeline state for ping-pong inputs
+        slot = 0
+        pre_staged = False
+
         while idx < na:
             attempt = min(cur_batch, na - idx)
             try:
@@ -548,12 +658,19 @@ def demmap_pos(
                 b1 = b0 + attempt
                 cur = attempt
                 with nvtx_range(f"BATCH[{b0}:{b1})", color=0xFF6F00):
+                    # Stage current batch if not pre-staged
+                    if not pre_staged:
+                        _stage_h2d(b0, cur, slot)
                     with nvtx_range("BATCH_PREP", color=0x8E24AA):
+                        # Ensure compute waits until inputs are ready
+                        compute_stream.wait_event(h2d_ready[slot])
                         with compute_stream:
-                            dn_b = cp.asarray(dd[b0:b1, :])
-                            ed_b = cp.asarray(ed[b0:b1, :])
+                            dn_b = dn_dev[slot][:cur, :]
+                            ed_b = ed_dev[slot][:cur, :]
 
-                            rmatrixin_b = rmatrix_d[None, :, :] * (1.0 / ed_b)[:, None, :]
+                            rmatrixin_b = (
+                                rmatrix_d[None, :, :] * (1.0 / ed_b)[:, None, :]
+                            )
                             A_b = cp.transpose(rmatrixin_b, (0, 2, 1))
                             dprime_b = dn_b / ed_b
 
@@ -615,7 +732,8 @@ def demmap_pos(
                                 bvec = cp.abs(weights_b)
                             else:
                                 bvec = (
-                                    cp.sqrt(cp.abs(weights_b)) / cp.sqrt(dlogt_d)[None, :]
+                                    cp.sqrt(cp.abs(weights_b))
+                                    / cp.sqrt(dlogt_d)[None, :]
                                 )
 
                     with nvtx_range("SVD_MAIN", color=0x1E88E5):
@@ -638,9 +756,20 @@ def demmap_pos(
                             ).squeeze(-1)
                             err_sq = cp.sum(ed_b**2, axis=1)
 
+                    # Stage next batch while current compute proceeds
+                    next_b0 = b1
+                    if next_b0 < na:
+                        next_cur = min(cur_batch, na - next_b0)
+                        _stage_h2d(next_b0, next_cur, 1 - slot)
+                        pre_staged = True
+                    else:
+                        pre_staged = False
+
                     with nvtx_range("LAMBDA_SELECT", color=0x3949AB):
                         with compute_stream:
-                            reg_vec = cp.full((cur,), float(reg_tweak), dtype=cp.float64)
+                            reg_vec = cp.full(
+                                (cur,), float(reg_tweak), dtype=cp.float64
+                            )
                             for _it in range(int(max_iter)):
                                 vals = (
                                     mu_b[:, None, :]
@@ -651,7 +780,9 @@ def demmap_pos(
                                 idx_mu = cp.argmin(cp.abs(discr), axis=1)
                                 lamb = mu_b[cp.arange(cur), idx_mu]
                                 filt = s / (s**2 + lamb[:, None])
-                                xprime = cp.matmul(V, (filt * coef)[:, :, None]).squeeze(-1)
+                                xprime = cp.matmul(
+                                    V, (filt * coef)[:, :, None]
+                                ).squeeze(-1)
                                 dem_out = bvec * xprime
                                 dn_pred = cp.matmul(dem_out, rmatrix_d)
                                 resid = (dn_b - dn_pred) / ed_b
@@ -670,7 +801,9 @@ def demmap_pos(
                             kdag = bvec[:, :, None] * kdag
                             edem_b = cp.sqrt(cp.sum(kdag**2, axis=2))
 
-                            kdagk = cp.matmul(kdag, cp.transpose(rmatrixin_b, (0, 2, 1)))
+                            kdagk = cp.matmul(
+                                kdag, cp.transpose(rmatrixin_b, (0, 2, 1))
+                            )
                             j = seg_idx_d
                             left = kdagk[:, :, j]
                             right = kdagk[:, :, j + 1]
@@ -679,7 +812,9 @@ def demmap_pos(
                             hm = rr >= thr[:, :, None]
                             hm_int = hm.astype(cp.int8)
                             first = cp.argmax(hm_int, axis=2)
-                            last = (hm.shape[2] - 1) - cp.argmax(hm_int[:, :, ::-1], axis=2)
+                            last = (hm.shape[2] - 1) - cp.argmax(
+                                hm_int[:, :, ::-1], axis=2
+                            )
                             has_any = cp.any(hm, axis=2)
                             width = (ltt_d[last] - ltt_d[first]) / 2.0
                             elogt_b = cp.where(has_any, width, dlogt_d[None, :])
@@ -687,7 +822,9 @@ def demmap_pos(
                     if rscl:
                         with nvtx_range("RSCL_ADJUST", color=0x8D6E63):
                             with compute_stream:
-                                mnrat = cp.mean(dn_b / cp.maximum(dn_pred, 1e-300), axis=1)
+                                mnrat = cp.mean(
+                                    dn_b / cp.maximum(dn_pred, 1e-300), axis=1
+                                )
                                 dem_out = dem_out * mnrat[:, None]
                                 edem_b = edem_b * mnrat[:, None]
                                 dn_pred = cp.matmul(dem_out, rmatrix_d)
@@ -712,6 +849,13 @@ def demmap_pos(
 
                         # Wait for compute to finish, then schedule memcpys on copy stream
                         copy_stream.wait_event(ready_evt)
+                        # Ensure device sources are contiguous on the copy stream
+                        with copy_stream:
+                            dem_src = cp.ascontiguousarray(dem_out)
+                            edem_src = cp.ascontiguousarray(edem_b)
+                            elogt_src = cp.ascontiguousarray(elogt_b)
+                            chisq_src = cp.ascontiguousarray(chisq_b)
+                            dn_pred_src = cp.ascontiguousarray(dn_pred)
                         # Support both CuPy constant names across versions
                         try:
                             kind = cp.cuda.runtime.memcpyDeviceToHost  # type: ignore[attr-defined]
@@ -721,36 +865,36 @@ def demmap_pos(
 
                         cp.cuda.runtime.memcpyAsync(
                             dem_dst.ctypes.data,
-                            dem_out.data.ptr,
-                            int(dem_out.size) * elsize,
+                            dem_src.data.ptr,
+                            int(dem_src.size) * elsize,
                             kind,
                             copy_stream.ptr,
                         )
                         cp.cuda.runtime.memcpyAsync(
                             edem_dst.ctypes.data,
-                            edem_b.data.ptr,
-                            int(edem_b.size) * elsize,
+                            edem_src.data.ptr,
+                            int(edem_src.size) * elsize,
                             kind,
                             copy_stream.ptr,
                         )
                         cp.cuda.runtime.memcpyAsync(
                             elogt_dst.ctypes.data,
-                            elogt_b.data.ptr,
-                            int(elogt_b.size) * elsize,
+                            elogt_src.data.ptr,
+                            int(elogt_src.size) * elsize,
                             kind,
                             copy_stream.ptr,
                         )
                         cp.cuda.runtime.memcpyAsync(
                             chisq_dst.ctypes.data,
-                            chisq_b.data.ptr,
-                            int(chisq_b.size) * elsize,
+                            chisq_src.data.ptr,
+                            int(chisq_src.size) * elsize,
                             kind,
                             copy_stream.ptr,
                         )
                         cp.cuda.runtime.memcpyAsync(
                             dn_reg_dst.ctypes.data,
-                            dn_pred.data.ptr,
-                            int(dn_pred.size) * elsize,
+                            dn_pred_src.data.ptr,
+                            int(dn_pred_src.size) * elsize,
                             kind,
                             copy_stream.ptr,
                         )
@@ -766,6 +910,8 @@ def demmap_pos(
 
                 idx = b1
                 cur_batch = attempt
+                # toggle ping-pong slot for next compute batch
+                slot = 1 - slot
                 # Free any immediately reclaimable device memory (safe: we hold refs)
                 cp.get_default_memory_pool().free_all_blocks()
             except cp.cuda.memory.OutOfMemoryError:
@@ -775,7 +921,19 @@ def demmap_pos(
                         cp.get_default_pinned_memory_pool().free_all_blocks()
                     except Exception:
                         pass
-                    attempt2 = max(1, attempt // 2)
+                    # Recompute a stable batch size from current free memory
+                    attempt2 = attempt
+                    try:
+                        free_b2, _ = cp.cuda.runtime.memGetInfo()  # type: ignore[attr-defined]
+                        bps2 = _bytes_per_sample_estimate(nf, nt, nmu)
+                        # Reserve ~50% of free mem for workspace/fragmentation
+                        est2 = int((free_b2 * 0.5) // max(1, bps2))
+                        attempt2 = max(1, min(est2, na - idx))
+                    except Exception:
+                        # Fallback to halving when memGetInfo fails
+                        attempt2 = max(1, attempt // 2)
+                    if attempt2 >= attempt:
+                        attempt2 = max(1, attempt // 2)
                     if attempt2 == attempt:
                         completed_gpu = False
                         break
@@ -787,8 +945,8 @@ def demmap_pos(
                         )
                     oom_retries += 1
                     cur_batch = attempt2
+                    pre_staged = False
                     continue
-
         # Drain outstanding async copies before returning
         for i in range(RING):
             _sync_and_clear_slot(i)
@@ -801,3 +959,7 @@ def demmap_pos(
                     int(oom_retries),
                 )
             return dem, edem, elogt, chisq, dn_reg
+        # If we reach here, we could not complete on GPU even after retries
+        raise RuntimeError(
+            "GPU OOM: exhausted retries; try reducing MULTIGPU_BATCH_SIZE or input size"
+        )

@@ -30,6 +30,14 @@ nvidia-smi
 Activate the Poetry venv and install the matching wheel with pip inside
 that venv (recommended when Poetry cannot fetch the wheel directly):
 
+```python
+# local shell, after `poetry install`
+poetry run python -m pip install "cupy-cuda12x==13.6.0"
+
+# or, inside the container (if using Singularity/Apptainer)
+singularity exec -p performance containers/python_poetry.sif python -m pip install "cupy-cuda12x==13.6.0"
+```
+
 multiGPU README
 ===============
 
@@ -41,12 +49,11 @@ Overview
 - Optional NVTX ranges for profiling with Nsight Systems/Compute
 
 Key components
-- `gpu_kernels.py`: Batched, GPU-first kernels (CuPy), adaptive batch sizing, optional NVTX ranges and fused kernels.
+- `gpu_kernels.py`: Batched, GPU-first kernels (CuPy), adaptive batch sizing, optional NVTX ranges.
 - `mpi_manager.py`: Rank/GPU mapping, robust scatter/gather helpers, barriers.
 - `main.py`: CLI orchestrator; enumerates inputs, scatters work, runs kernels, gathers/saves outputs.
 - `logging.py`: Rank-aware logging with minimal console noise.
 - `preempt.py`: Best‑effort preemption handlers for schedulers.
-- `checkpoint.py`: Atomic checkpoint saves with optional async write.
 
 Prerequisites
 -------------
@@ -119,7 +126,6 @@ These variables can be exported before `sbatch` or passed via `--export` to `hpc
 - Multi-GPU runtime (code-level)
   - `MULTIGPU_BATCH_SIZE` (int): 0 = auto (adaptive by free mem). >0 forces a fixed batch size.
   - `MULTIGPU_NVTX` (0/1): Enable Python-level NVTX ranges (requires `poetry install --with profiling`).
-  - `MULTIGPU_NO_FUSE` (0/1): Disable `cp.fuse()` wrappers in kernels (debug/determinism; default 0).
   - `MULTIGPU_VERBOSE` (0/1): Extra info logs in kernel paths (default 0).
   - `MULTIGPU_PREEMPT` (0/1): Register preemption signal handlers (best-effort checkpoint hook; default 0).
   - `MULTIGPU_SAVE_COMPRESSED` (0/1): Save aggregated outputs with compression (default 0 = plain `.npz`).
@@ -171,8 +177,6 @@ Operational environment variables (selected)
 - GPU kernel controls (see `gpu_kernels.py`):
   - `MULTIGPU_BATCH_SIZE` (int): 0 = adaptive (default). Set > 0 to override.
   - `MULTIGPU_NVTX` (0/1): Add NVTX ranges in kernels.
-  
-  - `MULTIGPU_NO_FUSE` (0/1): Disable cp.fuse wrappers for debugging.
   - `MULTIGPU_VERBOSE` (0/1): Extra logs (batching, memory pool).
   - `MULTIGPU_PREEMPT` (0/1): Register preemption handlers.
 - NCCL/UCX tuning (in `slurm_run_multiGPU.sh`):
@@ -185,7 +189,12 @@ Batch size and memory
 - Override with `MULTIGPU_BATCH_SIZE` for predictable behavior (e.g., performance sweeps).
 
 Overlap compute and transfers
-- Data transfers and compute are batched; overlap strategies may be introduced in future revisions.
+- Triple buffering overlaps Host→Device staging, compute, and Device→Host copies:
+  - Streams: dedicated H2D staging stream, compute stream, and D2H copy stream (all non-blocking).
+  - Ping‑pong device input buffers for `dn` and `edn` allow staging batch N+1 while computing batch N and copying results for N‑1.
+  - Small ring on the host retains device tensors until async copies complete.
+  - Batch size is OOM‑aware and may downshift dynamically; the pipeline resets staging when this occurs.
+  This yields better GPU utilization when PCIe/NVLink and compute can overlap.
 
 CuPy and memory pools
 - CuPy’s default memory pool is leveraged implicitly; heavy runs benefit from fewer allocs and better reuse. The workspace manager can free blocks between very large runs.
@@ -201,11 +210,14 @@ Enable with `MULTIGPU_NVTX=1`. You’ll see the following ranges in Nsight:
   - `DEM_SOLVE_INIT` — 0x455A64 (setup: device copies, matrices, batch size)
   
   - `BATCH[b0:b1)` — 0xFF6F00 (per-batch envelope) containing:
+    - `H2D_STAGE` (host→device staging of current/next batch on dedicated stream)
     - `BATCH_PREP` (batch slicing, response prep)
-    - `SVD` (batched rectangular SVD)
+    - `GLOCI_WEIGHTS` or `L0_PASS` (weight construction)
+    - `SMOOTH_WEIGHTS`
+    - `SVD_MAIN` (batched rectangular SVD)
     - `LAMBDA_SELECT` (per-sample regularization search)
-    - `RECONSTRUCTION_CALC` (DEM reconstruction + predictions)
-  - `DEVICE_TO_HOST` (D2H copies)
+    - `EDEM_ELOGT` (uncertainties and width proxy)
+  - `DEVICE_TO_HOST_ASYNC` (D2H copies on dedicated stream)
 - MPI collectives (appear around data distribution/aggregation):
   - `MPI.Scatterv`
   - `MPI.Gatherv`
@@ -233,12 +245,10 @@ Quick checks
 Appendix: module map
 --------------------
 - `main.py` — enumerates inputs, scatters per-rank rows, runs `gpu_kernels.demmap_pos`, gathers/saves.
-- `gpu_kernels.py` — adaptive batching, batched SVD, lambda selection, optional streams/NVTX/fused ops.
+- `gpu_kernels.py` — adaptive batching, batched SVD, lambda selection, optional streams/NVTX ops.
 - `mpi_manager.py` — `init_mpi()`, `get_local_rank_info()`, `scatterv_array()`, `gatherv_array()`, and GPU binding helpers.
 - `logging.py` — safe per-rank logs + quiet console.
 - `preempt.py` — signal handlers to run a user callback and barrier.
-- `checkpoint.py` — atomic saves with pruning; async write option.
-  the module raises `RuntimeError` to avoid silent fallbacks in
 
 Vendor parity notes
 -------------------

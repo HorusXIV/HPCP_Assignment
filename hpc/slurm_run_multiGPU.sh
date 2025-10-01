@@ -101,10 +101,16 @@ fi
 export POETRY_VIRTUALENVS_PATH="/workspace/.venv"
 export POETRY_CACHE_DIR="/workspace/.cache/pypoetry"
 
-singularity exec --cleanenv --nv --bind "$REPO_DIR":/workspace "$IMAGE" \
+singularity exec --cleanenv --nv \
+  --env PROFILE=${PROFILE} --env MULTIGPU_NVTX=${MULTIGPU_NVTX} \
+  --bind "$REPO_DIR":/workspace "$IMAGE" \
   bash -lc 'set -e; cd /workspace; \
     if command -v poetry &>/dev/null; then \
-      poetry install --no-interaction --no-ansi; \
+      if [[ "${PROFILE:-0}" == "1" || "${MULTIGPU_NVTX:-0}" == "1" ]]; then \
+        poetry install --no-interaction --no-ansi --with profiling; \
+      else \
+        poetry install --no-interaction --no-ansi; \
+      fi; \
     else \
       echo "poetry not found in container; skipping install" >&2; \
     fi'

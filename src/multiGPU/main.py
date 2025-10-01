@@ -72,6 +72,19 @@ def main():
     _ = mlog.setup_logging(log_root, rank=rank, size=size)
     log = logging.getLogger(__name__)
     log.info("Starting rank %d/%d; results dir: %s", rank, size - 1, results_root)
+    # Quick NVTX availability probe so logs reveal whether ranges should appear
+    try:
+        from src.common.nvtx import nvtx_available as _nvtx_avail
+
+        _nvtx_env = os.environ.get("MULTIGPU_NVTX", "0")
+        _nvtx_on = _nvtx_avail()
+        log.info("NVTX enabled=%s (env MULTIGPU_NVTX=%s)", str(_nvtx_on), _nvtx_env)
+        if _nvtx_env == "1" and not _nvtx_on:
+            log.warning(
+                "NVTX requested but unavailable: install profiling extras (poetry install --with profiling) so the 'nvtx' package is present."
+            )
+    except Exception:
+        pass
 
     # Map rank to GPU based on node-local rank
     with nvtx_range("RANK_GPU_BIND", color=0x009688):
@@ -180,7 +193,7 @@ def main():
                                 edn2d = mio.ensure_2d_dn(arrays[1])
                             else:
                                 raise RuntimeError(
-                                    ("Input file missing requireddn and edn arrays")
+                                    ("Input file missing required dn and edn arrays")
                                 )
                     else:
                         dn2d = mio.ensure_2d_dn(dn)
@@ -191,7 +204,7 @@ def main():
                             edn2d = np.repeat(edn2d, dn2d.shape[0], axis=0)
                         else:
                             raise RuntimeError(
-                                ("edn shape does not matchdn and cannot be broadcast")
+                                ("edn shape does not match dn and cannot be broadcast")
                             )
 
                     n_samples = int(dn2d.shape[0])
@@ -229,7 +242,7 @@ def main():
                     local_dn = dn2d
                     local_edn = edn2d
                     counts = [local_dn.shape[0]]
-                
+
                 # Rank 0: announce pixel distribution so it appears in Slurm .out
                 if rank == 0:
                     try:
@@ -366,9 +379,7 @@ def main():
             try:
                 mmpi.barrier(comm)
             except Exception as e:
-                logging.getLogger(__name__).warning(
-                    "Final MPI barrier failed: %s", e
-                )
+                logging.getLogger(__name__).warning("Final MPI barrier failed: %s", e)
 
     # Clean shutdown of logging
     with nvtx_range("SHUTDOWN", color=0x9E9E9E):
