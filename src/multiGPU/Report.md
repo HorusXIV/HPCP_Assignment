@@ -3,38 +3,38 @@
 
 ## Baseline and First Principles
 
-I began with  the baseline NumPy implementation that was provided to us. As a first step I replaced NumPy with CuPy and vectorized the hot paths to eliminate as much Python loops as possible. This converted the code from being loop-bound to being GPU-friendly. However, when i let it run on the slurm, GPU utilisation was only arround 14% and overall it was even slower than the CPU version by hughe margin (9h + / image).
+I began with the baseline NumPy implementation that was provided. As a first step, I replaced NumPy with CuPy and vectorized the hot paths to eliminate as many Python loops as possible. This converted the code from being loop‑bound to being GPU‑friendly. However, when I ran it on SLURM, GPU utilization was only around 14%, and overall it was even slower than the CPU version by a huge margin (9+ hours per image).
 
-To let it run on the cluster, I created a singularity environment. This was a huge time investment because of the many dependencies and the fact that I had not much prior experience with singularity. After matching CuPy and CUDA versions, as well as installing some additional librarys to avoid compilation errors, I was able to run the code on the cluster.
+To run on the cluster, I created a Singularity container. This took significant time due to numerous dependencies and limited prior experience with Singularity. After matching CuPy and CUDA versions and installing additional libraries to avoid compilation errors, I was able to run the code on the cluster.
 
-## Multi-GPU Distribution & First Improvements
+## Multi‑GPU Distribution and Initial Improvements
 
-Next, I added MPI (using MPI4PY) to distribute work across multiple GPUs. I decided for a strategy where each image is scattered across all available GPUs. This is possible because its an embarrassingly parallel problem. Means every pixel stands for itself, one pixel does not influence another in any way.
-This was easy to implement and balanced load reasonably well. Alternatives would have been to distribute a subset of of images to each GPU, but if not all images are similar in size, this could lead to load imbalance. Another alternative would have been to distribute a subset of images to each node, and then split the work between the GPUs on that node. I decided against this approach because it would have been way more complex to implement with no certain improvement. With this multi-GPU implementation and some other minor tweaks in the code, I was able to bring the time down to about 2h / image.
+Next, I added MPI (using mpi4py) to distribute work across multiple GPUs. I chose a strategy where each image is partitioned across all available GPUs. This is feasible because the problem is embarrassingly parallel: each pixel is independent and does not influence any other.
+This was straightforward to implement and balanced load reasonably well. Alternatives would have been to distribute disjoint subsets of images to each GPU, but if image sizes vary, this can lead to load imbalance. Another alternative would have been to distribute a subset of images per node and then split them among the GPUs on that node. I decided against this because the added complexity had uncertain benefits. With this multi‑GPU implementation and some minor code tweaks, I reduced runtime to about 2 hours per image.
 
 ## Profiling
 
-Now I was on the limit of obvious improvements, so it was time to profile. I used Nsight Compute with NVTX annotations to get a detailed timeline of GPU activity. I then ran a profiling on each GPU, but because I expected them to behave similarly, I only analyzed one in detail (usually GPU 0). Additionally, I used `nvidia-smi` & `nvtop` on the computing server to monitor memory usage and GPU utilization in real time.
+At this point the obvious improvements were exhausted, so it was time to profile. I used NVIDIA Nsight Systems with NVTX annotations for timeline analysis. I profiled each GPU briefly but analyzed one in detail (usually GPU 0), assuming similar behavior. Additionally, I used `nvidia-smi` and `nvtop` on the compute nodes to monitor memory usage and GPU utilization in real time.
 
-This lead to two key insights: First, even with the improvements so far, GPU utilization was still low (around 30-35%), and secondly, there were significant breaks between this times of "high" utilisation where GPU-Utilisation dropped significantly.
+This led to two key insights: (1) even with the improvements so far, GPU utilization was still modest (around 30–35%), and (2) there were significant idle gaps between bursts of higher utilization.
 
 ## Batch Sizing
 
-Because of these Insights, I was able to implement the biggest Improvement of this whole Project: Large batches dramatically increased throughput by minimizing kernel-launch and transfer overhead. 
-I added an adaptive batch-sizing heuristic: estimate free GPU memory, approximate batch footprint, attempt the largest safe batch, and back off on OOM. This achieved high memory utilization but still wasted time due to OOM retries. About one third of total GPU time in the worst cases. Overall this brought the time down to about 4m / image.
+Based on these insights, I implemented the biggest improvement of the project: larger batches. Large batches dramatically increased throughput by minimizing kernel launch and transfer overhead.
+I added an adaptive batch‑sizing heuristic: estimate free GPU memory, approximate batch footprint, attempt the largest safe batch, and back off on OOM. This achieved high memory utilization but still wasted time due to OOM retries. About one third of total GPU time in the worst cases. Overall, this brought the time down to about 4 minutes per image.
 
-However this was due to a bug in my kernel logic, where I accidentally did some operations with dn ** 2 twice. This lead to a compute complexity of O(n^2) instead of the intended O(n), which made the algorithm much more memory intensive. After fixing this bug (and a similar one with write operations), I was able to run with much larger batches and the time dropped to about 35s / image.
+However, part of this behavior was due to a bug in my kernel logic, where I accidentally applied a term involving dn**2 twice. This made the computational complexity effectively O(n^2) instead of the intended O(n), and increased memory traffic. After fixing this bug (and a similar one affecting write operations), I was able to run with much larger batches, and the time dropped to about 35 seconds per image.
 
-## Overlapping Transfers and Compute & Memory pooling
+## Overlapping Transfers and Compute & Memory Pooling
 
-After the batch work, I addressed pipeline idle gaps. I introduced CUDA streams with a double-buffering pattern to overlap host-to-device (H2D) copies with compute. Additionally, I implemented a memory pool to avoid repeated allocation overhead. This reduced the gaps between kernels and improved GPU occupancy. The profile the now showed ~205.3 s of pure compute within a 334 s run, even with profiler overhead and occasional OOM retries.
+After the batch work, I addressed pipeline idle gaps. I introduced CUDA streams with a double‑buffering pattern to overlap host‑to‑device (H2D) copies with compute. Additionally, I implemented a memory pool to avoid repeated allocation overhead. This reduced the gaps between kernels and improved effective GPU occupancy. The profile then showed ~205.3 s of pure compute within a 334 s run, even with profiler overhead and occasional OOM retries.
 
-Extending the approach to triple buffering (H2D → compute → Copy in separate streams) should've smoothed out the pipeline even more. To verify this, I implemented it and ran an experiment to compare double vs. triple buffering.
+Extending the approach to triple buffering (H2D → compute → copy in separate streams) should smooth out the pipeline even more. To verify this, I implemented it and ran an experiment to compare double vs. triple buffering.
 
 ### Experiment: Triple vs. Double Buffering
 
-Almost all the previous changes yielded clear improvements, so the only real experiment was comparing double vs. triple buffering. I ran 3 rounds of 10 images each, measuring wall time and compute time per image. Then I discarded the first two rounds (warm-up) and performed a Welch's t-test (because variances were unequal) on the remaining data. All the Data is collected from NVIDIA Nsight Compute reports.
-To avoid additional variability, I kept the batch size constant at 198759 for both implementations. Another thing to improve test reliability would have been to fix the SLURM-Server allocation to a specific node, but because I don't really know how good this works on our cluster, I decided against it.
+Almost all previous changes yielded clear improvements, so the focused experiment was comparing double vs. triple buffering. I ran 3 rounds of 10 images each, measuring wall time and compute time per image. I discarded the first two rounds (warm‑up) and performed a one‑sided Welch’s t‑test (unequal variances) on the remaining data. All data were collected from NVIDIA Nsight Systems reports.
+To avoid additional variability, I kept the batch size constant at 198'759 for both implementations. Another way to improve test reliability would have been to pin the SLURM job to a specific node, but I decided against it due to uncertainty about scheduling behavior on our cluster.
 
 #### Hypotheses
 * **H₀ (null):** The mean time with triple buffering is **not lower** than with double buffering.
@@ -42,7 +42,7 @@ To avoid additional variability, I kept the batch size constant at 198759 for bo
 * **H₁ (alt, one-sided):** The mean time with triple buffering is **lower** than with double buffering.
   ( $$\mu_\text{triple} < \mu_\text{double} $$ )
 
-We define significance level α = 0.05.
+We define the significance level α = 0.05.
 
 #### Measurements
 
@@ -77,24 +77,24 @@ Time in seconds per image:
 
 #### Hypothesis test summary
 
-| Metric       | α (p-value threshold) | Welch’s t-test p-value | H₀ (null)                                   | Decision              |
-| ------------ | --------------------: | ---------------------: | ------------------------------------------- | --------------------- |
-| Wall Time    |                  0.05 |              0.0002424 | $$\mu_\text{triple} \ge \mu_\text{double} $$    | **Reject H₀**         |
-| Compute Time |                  0.05 |                0.04911 | $$\mu_\text{triple} \ge \mu_\text{double} $$    | **Reject H₀**         |
+| Metric       | α (p-value threshold) | Welch’s t-test p-value | H₀ (null)                                       | Decision              |
+| ------------ | --------------------: | ---------------------: | ----------------------------------------------: | --------------------- |
+| Wall Time    |                  0.05 |              0.0002424 | $$\mu_\text{triple} \ge \mu_\text{double} $$    | **Reject H₀**           |
+| Compute Time |                  0.05 |                0.04911 | $$\mu_\text{triple} \ge \mu_\text{double} $$    | **Reject H₀**           |
 
 #### Conclusion
-The measurements show that the triple buffering implementation has a lower average wall time per image compared to the double buffering implementation. The t-test for both, wall time and compute yield p-values lower than 0.05, leading to the rejection of the null hypothesis. This indicates that there is a statistically significant difference in both measured metrics between the two implementations, with triple buffering being faster, the implementation with triple buffering is therefore preferred.
+The measurements show that the triple‑buffering implementation has a lower average wall time per image than the double‑buffering implementation. The t‑tests for both wall time and compute time yield p‑values below 0.05, leading to rejection of the null hypothesis. This indicates a statistically significant difference in both metrics, with triple buffering being faster; therefore, the triple‑buffered implementation is preferred.
 
 ## Improving Memory Stability
 
-This all was great, but there still was a problem: Out-of-memory (OOM) errors still occurred frequently, especially with larger images or higher μ grid points. Each OOM triggered a retry with a smaller batch (reducing the batch size by half each time), but this wasted time and hurt throughput. 
+This was encouraging, but there was still a problem: out‑of‑memory (OOM) errors occurred frequently, especially with larger images or higher μ‑grid points. Each OOM triggered a retry with a smaller batch (reducing the batch size by half each time), but this wasted time and hurt throughput.
 
-There were multiple approaches to improve this, for example to statically reduce number of μ grid points, but I wanted to keep Vendor Parity as high as possible. So I focused on improving the memory handling logic. before, after each OOM, the batch size was simply halfed. The new approach is more sophisticated: we flush reclaimable pool blocks before sizing so the estimate reflects real free memory; the target fraction of free memory is per default now 0.75 (and can be tuned by setting MULTIGPU_BATCH_MEM_FRAC) to still leave some headroom for library overhead. 
+There were multiple approaches to improve this (for example, statically reducing the number of μ‑grid points), but I wanted to keep vendor parity as high as possible. So I focused on improving the memory‑handling logic. Previously, after each OOM, the batch size was simply halved. The new approach is more robust: flush reclaimable pool blocks before sizing so the estimate reflects real free memory; set the target fraction of free memory to 0.75 by default (tunable via the `MULTIGPU_BATCH_MEM_FRAC` environment variable) to leave headroom for library overhead.
 
 
-### Experiment 2: Memory Handling Logic
+### Experiment 2: Memory‑Handling Logic
 
-The Test Setup is the same as for the Last experiment: 3 rounds of 10 images each, measuring wall time. Then I discarded the first two rounds (warm-up) and performed a one sided Welch's t-test on the remaining data. Again, all the Data is collected from NVIDIA Nsight Compute reports.
+The test setup matches the previous experiment: 3 rounds of 10 images each, measuring wall time. I discarded the first two rounds (warm‑up) and performed a one‑sided Welch’s t‑test on the remaining data. Again, all data were collected from NVIDIA Nsight reports.
 
 #### Hypotheses
 * **H₀ (null):** The newest memory handling is **not faster** than the old version.
@@ -102,7 +102,7 @@ The Test Setup is the same as for the Last experiment: 3 rounds of 10 images eac
 * **H₁ (alt, one-sided):** The newest memory handling is **faster** (lower mean time).
   ( $$\mu_\text{new} < \mu_\text{old}$$ )
 
-We define significance level α = 0.05.
+We define the significance level α = 0.05.
 
 #### Measurements
 
@@ -146,25 +146,24 @@ Time in seconds per image:
 | Decision         |               **Reject H₀** |
 
 #### Conclusion
-The measurements show that the new memory handling logic implementation has a lower average wall time per image compared to the old implementation. The t-test yields a p-value of $$3.671\mathrm{e}{-08}$$, which is significantly less than the significance level of 0.05, leading to the rejection of the null hypothesis. This indicates that there is a statistically significant difference in wall time between the two implementations, with the new memory handling logic being faster.
+The measurements show that the new memory‑handling logic has a lower average wall time per image than the old implementation. The t‑test yields a p‑value of $$3.671\mathrm{e}{-08}$$, which is far below the significance level of 0.05, leading to rejection of the null hypothesis. This indicates a statistically significant difference in wall time between the two implementations, with the new memory‑handling logic being faster.
 
 ## Summary
 
-With all those improvements the final compute time per image was on average 24.58 ± 1.46 seconds. At this point I reach diminishing returns: GPU utilization is now around 90-100% during compute time(according to nvidia-smi), and the timeline shows a more or less steady stream of kernels only with gaps for saving / loading the Data.
-Occasional OOMs still happen but are much more rare and GPU dependent, and the adaptive batch sizing keeps memory usage high without frequent retries (max. 1x per Image). Further improvements would require more complex changes, such as topology-aware scheduling or algorithmic modifications. However, as I have already spent way more time than expected on this project and I learned already quite a lot of things, I will not pursue these further possible optimizations.
+With these improvements, the final compute time per image averaged 24.58 ± 1.46 seconds. At this point, I reached diminishing returns: GPU utilization during compute time is now around 90–100% (per `nvidia-smi`), and the timeline shows a steady stream of kernels with brief gaps for saving/loading data.
+Occasional OOMs still happen but are much rarer and GPU‑dependent. The adaptive batch sizing keeps memory usage high without frequent retries (at most 1× per image). Further improvements would likely require more complex changes, such as topology‑aware scheduling or algorithmic modifications. Given time constraints and the learning goals achieved, I did not pursue these further optimizations.
 
-I also noticed that it really depends on which server you let the program run. If I let the current ( and final version) run e.g. on Server0092 with 4x NVIDIA RTX 2080 TI, I'm almost 4 seconds slower per image than on Server0101 with 4x NVIDIA RTX 3080 Ti. This of course had also some impact on telling if an improvement was real or just noise, especially at the point where improvements were only in the range of 2-4 seconds. That's where I started to do the real experiments with statistical testing, as before it would have taken too much time to do this for every single change.
+I also noticed strong dependence on the server/node. For example, running the final version on Server0092 with 4× NVIDIA RTX 2080 Ti was almost 4 seconds slower per image than on Server0101 with 4× NVIDIA RTX 3080 Ti. This variability complicates judging whether an observed improvement is real or noise, especially for effects in the 2–4 second range, which motivated the statistical testing above.
 
 ### Lessons Learned
 
-1. **Profiling saves lives** Nsight + NVTX traces show things that you can't just see otherwise, also live monitoring with nvidia-smi / nvtop is very useful, to know where to improve in the future.
-2. **Batch size on top** My Biggest improvements had all to do with optimizing batch size. Bigger batches amortize overhead and increase throughput, but require careful memory management, or else you have much wasted time on OOM retries.
-3. **Overlap matters** Streams and buffering convert dead time into work. However if you want go full parallelism, including loading the data while still computing, you have to watch out for race conditions and memory failures. Even with the current approach, there is still some idle time while loading / saving the data, but getting this right would have required way more time spend on parallel computing, and frankly, I don't really know if Python is the right tool for this.
-4. **KISS (Keep it simple, stupid)** Many optimizations are possible, but with the simplest you can gain the most. I spent a lot of time on implementing MPI, but in the end, this was not really necessary, because the batch size improvements were way more important. Also I could have saved a lot of time if I would have implemented the adaptive batch sizing earlier.
+1. Profiling reveals what matters. Nsight Systems with NVTX ranges shows behaviors you can’t see otherwise; live monitoring with `nvidia-smi`/`nvtop` helps target future work.
+2. Batch size dominates. The biggest gains came from optimizing batch size. Larger batches amortize overhead and increase throughput but require careful memory management; otherwise, OOM retries waste time.
+3. Overlap matters. Streams and buffering convert idle time into useful work. If you aim for full parallelism (including loading data while computing), beware race conditions and memory pressure. There is still some idle time while loading/saving data; removing it would likely require significantly more parallel I/O work (and Python may not be ideal for that).
+4. Keep it simple. Many optimizations are possible, but simple changes often yield the largest benefits. I spent time implementing MPI, but batch‑size improvements had a much larger impact. Implementing adaptive batch sizing earlier would have saved time.
 
-### Future Improvement possibilities
+### Future Work
 
-* **Topology-aware scheduling:** Distribute work based on GPU interconnects (e.g., NVLink vs. PCIe) & Node Structure to minimize data transfer times.
-* **Asynchronous I/O:** Further overlap data loading/saving with computation using dedicated threads or processes.
-* **Algorithmic levers:** Explore algorithmic changes that reduce memory footprint or computational complexity.
----
+* Topology‑aware scheduling: distribute work based on GPU interconnects (e.g., NVLink vs. PCIe) and node topology to minimize transfer times.
+* Asynchronous I/O: further overlap data loading/saving with computation using dedicated threads/processes or staged prefetching.
+* Algorithmic levers: explore algorithmic changes that reduce memory footprint or computational complexity.
