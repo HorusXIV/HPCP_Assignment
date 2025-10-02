@@ -27,7 +27,7 @@ def _base_root_default() -> Path:
 
 def _gpu_device_summary() -> str:
     try:
-        import cupy as cp  # type: ignore
+        import cupy as cp
         dev_id = int(cp.cuda.runtime.getDevice())
         props = cp.cuda.runtime.getDeviceProperties(dev_id)
         name = props.get("name", b"GPU").decode() if isinstance(props.get("name"), (bytes, bytearray)) else str(props.get("name", "GPU"))
@@ -37,9 +37,8 @@ def _gpu_device_summary() -> str:
 
 
 def _gpu_utilization_once(index_hint: Optional[int] = None) -> Optional[dict]:
-    # Prefer NVML if available
     try:
-        import pynvml  # type: ignore
+        import pynvml
         pynvml.nvmlInit()
         count = pynvml.nvmlDeviceGetCount()
         idx = int(index_hint) if index_hint is not None and 0 <= int(index_hint) < count else 0
@@ -58,7 +57,6 @@ def _gpu_utilization_once(index_hint: Optional[int] = None) -> Optional[dict]:
     except Exception:
         pass
 
-    # Fallback: nvidia-smi parsing
     try:
         q = [
             "nvidia-smi",
@@ -122,6 +120,7 @@ def _parse_tile_arg(tile: Union[str, Tuple[int, int], None]) -> Tuple[int, int]:
     v = int(s)
     return v, v
 
+
 def _free_gpu_memory():
     """Forcefully release GPU memory (CuPy + Numba)."""
     try:
@@ -153,22 +152,14 @@ def run_benchmark_single_gpu(
     device: Optional[str] = None,
 ) -> Dict[str, Union[str, float, int]]:
 
-    # Optionally set CUPY device based on --device argument (e.g. 'cuda:0' or '0')
+    import cupy as cp
+
+    # Optional device selection
     if device is not None and device.lower() != "cpu":
         try:
-            import cupy as cp  # type: ignore
-
-            dev = 0
-            if isinstance(device, str) and device.lower().startswith("cuda:"):
-                dev = int(device.split(":", 1)[1])
-            else:
-                try:
-                    dev = int(device)
-                except Exception:
-                    dev = int(cp.cuda.runtime.getDevice())
+            dev = int(device.split(":")[1]) if ":" in device else int(device)
             cp.cuda.Device(dev).use()
         except Exception:
-            # If cupy not available or device selection fails, continue and let gpu_ready report
             pass
 
     data_dir = data_dir or "data/np32"
@@ -177,56 +168,42 @@ def run_benchmark_single_gpu(
         patterns = [ext] if isinstance(ext, str) else list(ext)
         raise FileNotFoundError(f"No files found in {data_dir} matching {patterns}")
 
-    # Select frames
+    # Frame selection
     if isinstance(idx, str):
         if idx.lower() in {"all", "-1"}:
             frame_idx: Sequence[int] = list(range(len(files)))
         else:
             i = _as_int(idx, 0)
-            if not (0 <= i < len(files)):
-                raise IndexError(f"--idx {i} out of range (0..{len(files) - 1})")
             frame_idx = [i]
     else:
         frame_idx = [int(i) for i in idx]
-        for i in frame_idx:
-            if not (0 <= i < len(files)):
-                raise IndexError(f"--idx {i} out of range (0..{len(files) - 1})")
 
-    # Determine crop size
+    # Determine crop
     if sizes and len(sizes) >= 2:
         H, W = int(sizes[0]), int(sizes[1])
     elif sizes and len(sizes) == 1:
         H = W = int(sizes[0])
     else:
-        _, H0, W0 = _npz_band_shape(Path(files[0]))
-        H, W = H0, W0
+        _, H, W = _npz_band_shape(Path(files[0]))
 
     Th, Tw = _parse_tile_arg(tile)
-
     bench_dir, stamp = _ensure_timestamped_root(bench_root)
 
-    def _load_frame_hw6(p: Path, H: int, W: int) -> np.ndarray:
+    def _load_frame_hw6(p: Path) -> np.ndarray:
         with np.load(p, allow_pickle=False) as z:
             bands = z["bands"].astype(np.float32)
         b = bands[:, :H, :W]
         return np.moveaxis(b, 0, -1)
 
-    frames = [_load_frame_hw6(Path(files[i]), H, W) for i in frame_idx]
-    stack = np.stack(frames, axis=0)  # (F, H, W, 6)
+    # Load frames
+    stack = np.stack([_load_frame_hw6(Path(files[i])) for i in frame_idx], axis=0)
     F = int(stack.shape[0])
 
-    # Initial GPU check & logging
     log = logging.getLogger(__name__)
     gpu_str = _gpu_device_summary()
     util0 = _gpu_utilization_once()
-    util_str = (
-        f"gpu={util0['gpu']}% mem={util0['mem']}% ({util0['mem_used_mb']}/{util0['mem_total_mb']} MB)"
-        if util0 else "util=unknown"
-    )
-    log.info(
-        "[singleGPU] starting compute: frames=%d crop=%dx%d tiles=%dx%d (GPU=%s, %s)",
-        F, H, W, Th, Tw, gpu_str, util_str,
-    )
+    util_str = f"gpu={util0['gpu']}% mem={util0['mem']}% ({util0['mem_used_mb']}/{util0['mem_total_mb']} MB)" if util0 else "util=unknown"
+    log.info("[singleGPU] starting compute: frames=%d crop=%dx%d tiles=%dx%d (GPU=%s, %s)", F, H, W, Th, Tw, gpu_str, util_str)
 
     if not gpu_ready():
         print("[singleGPU] GPU not available; results will match CPU baseline performance.")
@@ -234,110 +211,72 @@ def run_benchmark_single_gpu(
     from src.common.solver import get_logt_bins_once as _bins
     NT, _ = _bins(nmu=nmu)
 
+    dem = np.empty((F, H, W, NT), dtype=np.float32)
+    edem = np.empty_like(dem)
+    chisq = np.empty((F, H, W), dtype=np.float32)
+
     with Profiler(client=None, benchdir=bench_dir, stamp=stamp, enable_perf_html=False) as prof:
         prof.section("compute", start=True)
 
-        # Prepare output arrays
-        dem = np.empty((F, H, W, NT), dtype=np.float32)
-        edem = np.empty_like(dem)
-        chisq = np.empty((F, H, W), dtype=np.float32)
+        # Process each frame
+        for fi in range(F):
+            frame_t0 = time.perf_counter()
+            frame = stack[fi]
 
-        # Try batch GPU path first (pass entire stack). If it fails, fall back to per-frame GPU or CPU.
-        frame_t0 = time.perf_counter()
-        try:
-            _free_gpu_memory()
-            # solve_tile_all_single_gpu accepts (F,H,W,6) or (H,W,6) and will use CuPy if available.
-            _dem, _edem, _chisq, logT_centers = solve_tile_all_single_gpu(stack, nmu=nmu)
-            # If returned single-frame shapes (shouldn't for batched input) coerce
-            if _dem.ndim == 3 and _dem.shape[0] == F:
-                dem[:, :, :, :] = _dem
-                edem[:, :, :, :] = _edem
-                chisq[:, :, :] = _chisq
-            elif _dem.ndim == 3 and _dem.shape[0] != F:
-                # Unexpected shape — try to broadcast / sanity-check
-                raise RuntimeError("GPU returned unexpected shape for dem when processing full stack")
-            else:
-                # If vendor returned (pixels,NT) flattened data, attempt reshape
-                try:
-                    dem[:, :, :, :] = _dem.reshape((F, H, W, NT))
-                    edem[:, :, :, :] = _edem.reshape((F, H, W, NT))
-                    chisq[:, :, :] = _chisq.reshape((F, H, W))
-                except Exception as re:
-                    raise RuntimeError("Unable to reshape GPU outputs to (F,H,W,NT)") from re
-        except Exception as e:
-            # Log and fallback: try per-frame GPU calls or CPU solver if necessary.
-            log.error("[singleGPU] batch GPU processing failed: %s", str(e))
-            # Try per-frame GPU processing (calls same solver with (H,W,6))
-            for fi in range(F):
-                frame_t0_f = time.perf_counter()
-                frame = stack[fi]
-                try:
-                    dem_f, edem_f, chisq_f, _ = solve_tile_all_single_gpu(frame, nmu=nmu)
-                    dem[fi] = dem_f
-                    edem[fi] = edem_f
-                    chisq[fi] = chisq_f
-                except Exception as e2:
-                    # As last resort use CPU solver per-frame
-                    log.error("[singleGPU] frame %d GPU failed: %s, falling back to CPU", fi, str(e2))
-                    from src.common.solver import solve_tile_all as _solve_cpu
-                    dem_f, edem_f, chisq_f, _ = _solve_cpu(frame, nmu=nmu, nt=NT)
-                    dem[fi] = dem_f
-                    edem[fi] = edem_f
-                    chisq[fi] = chisq_f
-                frame_dt_f = time.perf_counter() - frame_t0_f
-                # per-frame logging
-                tiles_per_frame = int(np.ceil(H / Th) * np.ceil(W / Tw))
-                ms_per_tile = (frame_dt_f / tiles_per_frame) * 1e3
-                util = _gpu_utilization_once()
-                if util:
-                    log.info(
-                        "[singleGPU] frame %d done: time=%.3fs tiles/frame=%d ms/tile=%.2f | gpu=%d%% mem=%d%% (%d/%d MB)",
-                        fi, frame_dt_f, tiles_per_frame, ms_per_tile,
-                        util["gpu"], util["mem"], util["mem_used_mb"], util["mem_total_mb"]
-                    )
-                else:
-                    log.info("[singleGPU] frame %d done: time=%.3fs tiles/frame=%d ms/tile=%.2f",
-                             fi, frame_dt_f, tiles_per_frame, ms_per_tile)
+            # Split frame into tiles
+            tile_coords = []
+            tiles_batch = []
+            for i0 in range(0, H, Th):
+                for j0 in range(0, W, Tw):
+                    i1 = min(i0 + Th, H)
+                    j1 = min(j0 + Tw, W)
+                    tile_coords.append((i0, i1, j0, j1))
+                    tiles_batch.append(frame[i0:i1, j0:j1, :])
+            tiles_batch = np.stack(tiles_batch, axis=0)  # (num_tiles, Th, Tw, 6)
+
+            try:
                 _free_gpu_memory()
+                dem_tiles, edem_tiles, chisq_tiles, _ = solve_tile_all_single_gpu(tiles_batch, nmu=nmu)
+            except Exception as e:
+                log.error("[singleGPU] frame %d GPU failed: %s, falling back to CPU", fi, str(e))
+                from src.common.solver import solve_tile_all as _solve_cpu
+                dem_tiles, edem_tiles, chisq_tiles, _ = _solve_cpu(frame, nmu=nmu, nt=NT)
+                dem_tiles = dem_tiles.reshape((len(tile_coords), Th, Tw, NT))
+                edem_tiles = edem_tiles.reshape((len(tile_coords), Th, Tw, NT))
+                chisq_tiles = chisq_tiles.reshape((len(tile_coords), Th, Tw))
 
-        frame_dt = time.perf_counter() - frame_t0
+            # Scatter tiles back
+            for k, (i0, i1, j0, j1) in enumerate(tile_coords):
+                dem[fi, i0:i1, j0:j1, :] = dem_tiles[k][:i1-i0, :j1-j0, :]
+                edem[fi, i0:i1, j0:j1, :] = edem_tiles[k][:i1-i0, :j1-j0, :]
+                chisq[fi, i0:i1, j0:j1] = chisq_tiles[k][:i1-i0, :j1-j0]
 
-        # Logical tiles for reporting
-        tiles_per_frame = int(np.ceil(H / Th) * np.ceil(W / Tw))
-        tiles_total = tiles_per_frame * F
-        ms_per_tile = (frame_dt / tiles_total) * 1e3 if tiles_total > 0 else float("nan")
-        tiles_per_s = tiles_total / frame_dt if frame_dt > 0 else float("nan")
+            frame_dt = time.perf_counter() - frame_t0
+            tiles_per_frame = len(tile_coords)
+            ms_per_tile = frame_dt / tiles_per_frame * 1e3
+            util = _gpu_utilization_once()
+            log.info("[singleGPU] frame %d done: time=%.3fs tiles=%d ms/tile=%.2f | gpu=%s",
+                     fi, frame_dt, tiles_per_frame, ms_per_tile,
+                     f"{util['gpu']}% mem={util['mem']}%" if util else "unknown")
 
-        util1 = _gpu_utilization_once()
-        if util1:
-            log.info(
-                "[singleGPU] finished: frames=%d total_tiles=%d time=%.3fs tiles/s=%.2f ms/tile=%.2f | gpu=%d%% mem=%d%% (%d/%d MB)",
-                F, tiles_total, frame_dt, tiles_per_s, ms_per_tile,
-                util1["gpu"], util1["mem"], util1["mem_used_mb"], util1["mem_total_mb"]
-            )
-        else:
-            log.info(
-                "[singleGPU] finished: frames=%d total_tiles=%d time=%.3fs tiles/s=%.2f ms/tile=%.2f",
-                F, tiles_total, frame_dt, tiles_per_s, ms_per_tile
-            )
+            _free_gpu_memory()  # clear memory after frame
 
         prof.section("compute", start=False)
 
-    # ---------------- persist outputs ----------------
     outputs_path = bench_dir / f"outputs_{stamp}.npz"
     np.savez_compressed(outputs_path, dem=dem, edem=edem, chisq=chisq)
 
+    # Reporting
     verify_ok = bool(verify)
     reports: List[str] = []
     if verify and golden_root:
         reports.append("Verification placeholder — integrate golden check here.")
         verify_ok = True
 
-    tiles_per_frame = int(np.ceil(H / Th) * np.ceil(W / Tw))
-    tiles_total = tiles_per_frame * F
     total_s = float((getattr(prof, "_sections", {}).get("compute", (0.0, 0.0))[1]))
+    tiles_total = F * ((H + Th - 1)//Th) * ((W + Tw - 1)//Tw)
     tiles_per_s = tiles_total / total_s if total_s > 0 else float("nan")
-    dems_per_s = (F * H * W) / total_s if total_s > 0 else float("nan")
+    dems_per_s = F * H * W / total_s if total_s > 0 else float("nan")
 
     bench = dict(
         stamp=stamp,
@@ -360,20 +299,11 @@ def run_benchmark_single_gpu(
     write_run_card_md(outdir=bench_dir, stamp=stamp, bench_row=bench, env=None, notes=reports)
     write_json(bench, bench_dir / f"bench_{stamp}.json")
 
-    log.info(
-        "[singleGPU] summary: frames=%d tiles/frame=%d crop=%dx%d total=%.3fs tiles/s=%.2f dems/s=%.2f",
-        F,
-        tiles_per_frame,
-        H,
-        W,
-        bench["total_seconds"],
-        tiles_per_s,
-        dems_per_s,
-    )
-    print(
-        f"[SingleGPU] frames={F} tiles/frame={tiles_per_frame} crop={H}x{W} "
-        f"total={bench['total_seconds']:.3f}s -> artifacts: {bench_dir}"
-    )
+    log.info("[singleGPU] summary: frames=%d tiles/frame=%d crop=%dx%d total=%.3fs tiles/s=%.2f dems/s=%.2f",
+             F, (H+Th-1)//Th * (W+Tw-1)//Tw, H, W, bench["total_seconds"], tiles_per_s, dems_per_s)
+
+    print(f"[SingleGPU] frames={F} tiles/frame={(H+Th-1)//Th * (W+Tw-1)//Tw} crop={H}x{W} "
+          f"total={bench['total_seconds']:.3f}s -> artifacts: {bench_dir}")
 
     return {
         "bench_root": str(bench_dir),
