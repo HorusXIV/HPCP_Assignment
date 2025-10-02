@@ -9,20 +9,21 @@ To let it run on the cluster, I created a singularity environment. This was a hu
 
 ## Multi-GPU Distribution & First Improvements
 
-Next, I added MPI to distribute work across multiple GPUs. I decided for a strategy where each image is scattered across all available GPUs. This was easy to implement and balanced load reasonably well when images were similar. Alternatives would have been to distribute a subset of of images to each GPU, but if not all images are similar in size, this could lead to load imbalance. Another alternative would have been to distribute a subset of images to each node, and then split the work between the GPUs on that node. I decided against this approach because it would have been way more complex to implement. With this multi-GPU and some other minor tweaks in the code, I was able to bring the time down to about 2h / image.
+Next, I added MPI (using MPI4PY) to distribute work across multiple GPUs. I decided for a strategy where each image is scattered across all available GPUs. This is possible because its an embarrassingly parallel problem. Means every pixel stands for itself, one pixel does not influence another in any way.
+This was easy to implement and balanced load reasonably well. Alternatives would have been to distribute a subset of of images to each GPU, but if not all images are similar in size, this could lead to load imbalance. Another alternative would have been to distribute a subset of images to each node, and then split the work between the GPUs on that node. I decided against this approach because it would have been way more complex to implement with no certain improvement. With this multi-GPU implementation and some other minor tweaks in the code, I was able to bring the time down to about 2h / image.
 
 ## Profiling
 
-Now I was on the limit of obvious improvements, so it was time to profile. I used Nsight Compute with NVTX annotations to get a detailed timeline of GPU activity. I then ran a profiling on each GPU, but because I expected them to behave similarly, I only analyzed one in detail (Usually GPU 0). Additionally, I used `nvidia-smi` & `nvtop` on the computing server to monitor memory usage and GPU utilization in real time.
+Now I was on the limit of obvious improvements, so it was time to profile. I used Nsight Compute with NVTX annotations to get a detailed timeline of GPU activity. I then ran a profiling on each GPU, but because I expected them to behave similarly, I only analyzed one in detail (usually GPU 0). Additionally, I used `nvidia-smi` & `nvtop` on the computing server to monitor memory usage and GPU utilization in real time.
 
-This lead to two key insights: First, even with the improvements so far, GPU utilization was still low (around 30-35%), and there were significant breaks between this times of "high" utilisation where GPU-Utilisation dropped significantly. 
+This lead to two key insights: First, even with the improvements so far, GPU utilization was still low (around 30-35%), and secondly, there were significant breaks between this times of "high" utilisation where GPU-Utilisation dropped significantly.
 
 ## Batch Sizing
 
-Because of these Insights, I was able to implement the biggest Improvement of this whole Project: Large batches dramatically increased throughput by amortizing kernel-launch and transfer overhead. 
-I added an adaptive batch-sizing heuristic: estimate free GPU memory, approximate batch footprint, attempt the largest safe batch, and back off on OOM. This achieved high memory utilization but still wasted time due to OOM retries—about one third of total GPU time in the worst cases. Overall this brought the time down to about 4m / image.
+Because of these Insights, I was able to implement the biggest Improvement of this whole Project: Large batches dramatically increased throughput by minimizing kernel-launch and transfer overhead. 
+I added an adaptive batch-sizing heuristic: estimate free GPU memory, approximate batch footprint, attempt the largest safe batch, and back off on OOM. This achieved high memory utilization but still wasted time due to OOM retries. About one third of total GPU time in the worst cases. Overall this brought the time down to about 4m / image.
 
-However this was due to a bug in my kernel logic, where I accidentally did some operations with dn ** 2 twice. This lead to a compute complexity of O(n^2) instead of the intended O(n), which made the algorithm much more memory intensive. After fixing this bug, I was able to run with much larger batches and the time dropped to about 35s / image.
+However this was due to a bug in my kernel logic, where I accidentally did some operations with dn ** 2 twice. This lead to a compute complexity of O(n^2) instead of the intended O(n), which made the algorithm much more memory intensive. After fixing this bug (and a similar one with write operations), I was able to run with much larger batches and the time dropped to about 35s / image.
 
 ## Overlapping Transfers and Compute & Memory pooling
 
@@ -41,9 +42,11 @@ To avoid additional variability, I kept the batch size constant at 198759 for bo
 * **H₁ (alt, one-sided):** The mean time with triple buffering is **lower** than with double buffering.
   ( $$\mu_\text{triple} < \mu_\text{double} $$ )
 
-We define ignificance level α = 0.05.
+We define significance level α = 0.05.
 
 #### Measurements
+
+Time in seconds per image:
 
 |  # | Double Buffer – Time/image | Double Buffer – Compute  | Triple Buffer – Time/image | Triple Buffer – Compute |
 | -: | -------------------------: | ------------------------ | -------------------------: | ----------------------: |
@@ -94,61 +97,63 @@ There were multiple approaches to improve this, for example to statically reduce
 The Test Setup is the same as for the Last experiment: 3 rounds of 10 images each, measuring wall time. Then I discarded the first two rounds (warm-up) and performed a one sided Welch's t-test on the remaining data. Again, all the Data is collected from NVIDIA Nsight Compute reports.
 
 #### Hypotheses
-* **H₀ (null):** The mean time with the new memory handling logic is **not lower** than with the old logic.
+* **H₀ (null):** The newest memory handling is **not faster** than the old version.
   ( $$\mu_\text{new} \ge \mu_\text{old}$$ )
-* **H₁ (alt, one-sided):** The mean time with the new memory handling logic is **lower** than with the old logic.
+* **H₁ (alt, one-sided):** The newest memory handling is **faster** (lower mean time).
   ( $$\mu_\text{new} < \mu_\text{old}$$ )
 
-We define ignificance level α = 0.05.
+We define significance level α = 0.05.
 
 #### Measurements
 
-|  # | Old version | New version |
-| -: | ----------: | ----------: |
-|  1 |       29.27 |       25.62 |
-|  2 |       29.50 |       26.19 |
-|  3 |       28.20 |       25.94 |
-|  4 |       28.91 |       26.32 |
-|  5 |       29.06 |       26.04 |
-|  6 |       28.91 |       26.32 |
-|  7 |       28.61 |       26.14 |
-|  8 |       29.27 |       27.06 |
-|  9 |       28.00 |       21.17 |
-| 10 |       28.80 |       23.14 |
-| 11 |       28.19 |       22.65 |
-| 12 |       28.70 |       23.19 |
-| 13 |       28.57 |       23.41 |
-| 14 |       27.60 |       23.96 |
-| 15 |       28.76 |       23.34 |
-| 16 |       29.85 |       22.91 |
-| 17 |       23.36 |       23.88 |
-| 18 |       25.01 |       23.89 |
-| 19 |       25.08 |       22.98 |
-| 20 |       26.14 |       27.67 |
-| 21 |       26.21 |       23.01 |
-| 22 |       26.21 |       23.52 |
-| 23 |       25.29 |       23.75 |
-| 24 |       25.40 |       23.58 |
+Time in seconds per image:
+
+|  # | Old Version | Newest Version |
+| -: | ----------: | -------------: |
+|  1 |       29.27 |          22.92 |
+|  2 |       29.50 |          23.65 |
+|  3 |       28.20 |          25.18 |
+|  4 |       28.91 |          25.60 |
+|  5 |       29.06 |          26.28 |
+|  6 |       28.91 |          26.81 |
+|  7 |       28.61 |          26.60 |
+|  8 |       29.27 |          22.14 |
+|  9 |       28.00 |          23.30 |
+| 10 |       28.80 |          23.48 |
+| 11 |       28.19 |          25.45 |
+| 12 |       28.70 |          25.57 |
+| 13 |       28.57 |          25.46 |
+| 14 |       27.60 |          23.76 |
+| 15 |       28.76 |          22.74 |
+| 16 |       29.85 |          23.10 |
+| 17 |       23.36 |          24.02 |
+| 18 |       25.01 |          22.74 |
+| 19 |       25.08 |          23.10 |
+| 20 |       26.14 |          24.02 |
+| 21 |       26.21 |          25.47 |
+| 22 |       26.21 |          26.04 |
+| 23 |       25.29 |          26.30 |
+| 24 |       25.40 |          26.17 |
 
 #### Hypothesis test summary
 
 | Metric           |                       Value |
 | ---------------- | --------------------------: |
 | α (significance) |                        0.05 |
-| TTEST p-value    |                  |
+| p-value          |    $$3.671\mathrm{e}{-08}$$ |
 | H₀               | $$\mu_\text{new} \ge \mu_\text{old}$$ |
 | H₁               | $$\mu_\text{new} < \mu_\text{old}$$ |
 | Decision         |               **Reject H₀** |
 
 #### Conclusion
-The measurements show that the new memory handling logic implementation has a lower average wall time per image compared to the old implementation. The t-test yields a p-value of 3.58787e-08, which is significantly less than the significance level of 0.05, leading to the rejection of the null hypothesis. This indicates that there is a statistically significant difference in wall time between the two implementations, with the new memory handling logic being faster.
+The measurements show that the new memory handling logic implementation has a lower average wall time per image compared to the old implementation. The t-test yields a p-value of $$3.671\mathrm{e}{-08}$$, which is significantly less than the significance level of 0.05, leading to the rejection of the null hypothesis. This indicates that there is a statistically significant difference in wall time between the two implementations, with the new memory handling logic being faster.
 
 ## Summary
 
-With all those improvements the final compute time per image was on average 24.40333333 ± 1.68542516 seconds. At this point I reach diminishing returns: GPU utilization is now around 90-100% during compute time(according to nvidia-smi), and the timeline shows a more or less steady stream of kernels only with gaps for saving / loading the Data. 
-Occasional OOMs still happen but are rare, and the adaptive batch sizing keeps memory usage high without frequent retries (1x per Image). Further improvements would require more complex changes, such as topology-aware scheduling or algorithmic modifications. However, as I have already spent way more time than expected on this project and I learned already quite some things, I will not pursue these further possible optimizations.
+With all those improvements the final compute time per image was on average 24.58 ± 1.46 seconds. At this point I reach diminishing returns: GPU utilization is now around 90-100% during compute time(according to nvidia-smi), and the timeline shows a more or less steady stream of kernels only with gaps for saving / loading the Data.
+Occasional OOMs still happen but are much more rare and GPU dependent, and the adaptive batch sizing keeps memory usage high without frequent retries (max. 1x per Image). Further improvements would require more complex changes, such as topology-aware scheduling or algorithmic modifications. However, as I have already spent way more time than expected on this project and I learned already quite a lot of things, I will not pursue these further possible optimizations.
 
-I also noticed that it really depends on which server you let the program run. If I let the current ( and final version) run e.g. on Server0092, I'm almost 4 seconds slower per image than on Server0101. This of course had also some impact on telling if an improvement was real or just noise, especially at the point where improvements were only in the range of 2-4 seconds. That's where I also started to do the real experiments with statistical testing, as before it would have taken too much time to do this for every single change.
+I also noticed that it really depends on which server you let the program run. If I let the current ( and final version) run e.g. on Server0092 with 4x NVIDIA RTX 2080 TI, I'm almost 4 seconds slower per image than on Server0101 with 4x NVIDIA RTX 3080 Ti. This of course had also some impact on telling if an improvement was real or just noise, especially at the point where improvements were only in the range of 2-4 seconds. That's where I started to do the real experiments with statistical testing, as before it would have taken too much time to do this for every single change.
 
 ### Lessons Learned
 
@@ -159,7 +164,7 @@ I also noticed that it really depends on which server you let the program run. I
 
 ### Future Improvement possibilities
 
-* **Topology-aware scheduling:** Distribute work based on GPU interconnects (e.g., NVLink vs. PCIe) to minimize data transfer times.
+* **Topology-aware scheduling:** Distribute work based on GPU interconnects (e.g., NVLink vs. PCIe) & Node Structure to minimize data transfer times.
 * **Asynchronous I/O:** Further overlap data loading/saving with computation using dedicated threads or processes.
 * **Algorithmic levers:** Explore algorithmic changes that reduce memory footprint or computational complexity.
 ---
