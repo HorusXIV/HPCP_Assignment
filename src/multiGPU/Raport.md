@@ -32,8 +32,16 @@ Extending the approach to triple buffering (H2D → compute → Copy in separate
 
 ### Experiment: Triple vs. Double Buffering
 
-Almost all the previous changes yielded clear improvements, so the only real experiment was comparing double vs. triple buffering. I ran 3 rounds of 10 images each, measuring wall time and compute time per image. Then I discarded the first two rounds (warm-up) and performed a t-test on the remaining data. All the Data is collected from NVIDIA Nsight Compute reports.
-To avoid additional variability, I kept the batch size constant at 198759 for both implementations. Another thing to improve test reliability would have been to fix the SLURM-Server allocation to a specific node, but because I don't really know how good this works on our cluster, I decided against it. 
+Almost all the previous changes yielded clear improvements, so the only real experiment was comparing double vs. triple buffering. I ran 3 rounds of 10 images each, measuring wall time and compute time per image. Then I discarded the first two rounds (warm-up) and performed a Welch's t-test (because variances were unequal) on the remaining data. All the Data is collected from NVIDIA Nsight Compute reports.
+To avoid additional variability, I kept the batch size constant at 198759 for both implementations. Another thing to improve test reliability would have been to fix the SLURM-Server allocation to a specific node, but because I don't really know how good this works on our cluster, I decided against it.
+
+#### Hypotheses
+* **H₀ (null):** The mean time with triple buffering is **not lower** than with double buffering.
+  ( \mu_\text{triple} \ge \mu_\text{double} )
+* **H₁ (alt, one-sided):** The mean time with triple buffering is **lower** than with double buffering.
+  ( \mu_\text{triple} < \mu_\text{double} )
+
+We define ignificance level α = 0.05.
 
 #### Measurements
 
@@ -66,26 +74,32 @@ To avoid additional variability, I kept the batch size constant at 198759 for bo
 
 #### Hypothesis test summary
 
-| Metric       | α (p-value threshold) | TTEST p-value | Null hypothesis (mean_triple = mean_double) | Decision              |
-| ------------ | --------------------: | ------------: | ------------------------------------------- | --------------------- |
-| Wall Time    |                  0.05 |    0.00071655 | mean_triple = mean_double                   | **Reject H₀**         |
-| Compute Time |                  0.05 |    0.07978201 | mean_triple = mean_double                   | **Fail to reject H₀** |
+| Metric       | α (p-value threshold) | Welch’s t-test p-value | H₀ (null)                                   | Decision              |
+| ------------ | --------------------: | ---------------------: | ------------------------------------------- | --------------------- |
+| Wall Time    |                  0.05 |              0.0002424 | \mu_\text{triple} \ge \mu_\text{double}     | **Reject H₀**         |
+| Compute Time |                  0.05 |                0.04911 | \mu_\text{triple} \ge \mu_\text{double}     | **Reject H₀**         |
 
 #### Conclusion
-The measurements show that the triple buffering implementation has a lower average wall time per image compared to the double buffering implementation. The t-test for wall time yields a p-value of 0.00071655, which is less than the significance level of 0.05, leading to the rejection of the null hypothesis. This indicates that there is a statistically significant difference in wall time between the two implementations, with triple buffering being faster.
-
-However, the compute times between the two implementations are not significantly different, as indicated by the p-value of 0.07978201, which is greater than 0.05. Therefore, we fail to reject the null hypothesis for compute time, suggesting that the compute performance is similar for both buffering strategies.
+The measurements show that the triple buffering implementation has a lower average wall time per image compared to the double buffering implementation. The t-test for both, wall time and compute yield p-values lower than 0.05, leading to the rejection of the null hypothesis. This indicates that there is a statistically significant difference in both measured metrics between the two implementations, with triple buffering being faster, the implementation with triple buffering is therefore preferred.
 
 ## Improving Memory Stability
 
 This all was great, but there still was a problem: Out-of-memory (OOM) errors still occurred frequently, especially with larger images or higher μ grid points. Each OOM triggered a retry with a smaller batch (reducing the batch size by half each time), but this wasted time and hurt throughput. 
 
-There were multiple approaches to improve this, for example to statically reduce number of μ grid points, but I wanted to keep Vendor Parity as high as possible. So I focused on improving the memory handling logic, so I refactored the policy to be conservative and converge faster: keep a safety margin, shrink more aggressively on OOM, and remember the last good size to avoid oscillation.
+There were multiple approaches to improve this, for example to statically reduce number of μ grid points, but I wanted to keep Vendor Parity as high as possible. So I focused on improving the memory handling logic. before, after each OOM, the batch size was simply halfed. The new approach is more sophisticated: we flush reclaimable pool blocks before sizing so the estimate reflects real free memory; the target fraction of free memory is per default now 0.75 (and can be tuned by setting MULTIGPU_BATCH_MEM_FRAC) to still leave some headroom for library overhead. 
 
 
 ### Experiment 2: Memory Handling Logic
 
-The Test Setup is the same as for the Last experiment: 3 rounds of 10 images each, measuring wall time. Then I discarded the first two rounds (warm-up) and performed a One Sided, heteroskedastic t-test on the remaining data. Again, all the Data is collected from NVIDIA Nsight Compute reports.
+The Test Setup is the same as for the Last experiment: 3 rounds of 10 images each, measuring wall time. Then I discarded the first two rounds (warm-up) and performed a one sided Welch's t-test on the remaining data. Again, all the Data is collected from NVIDIA Nsight Compute reports.
+
+#### Hypotheses
+* **H₀ (null):** The mean time with the new memory handling logic is **not lower** than with the old logic.
+  ( \mu_\text{new} \ge \mu_\text{old} )
+* **H₁ (alt, one-sided):** The mean time with the new memory handling logic is **lower** than with the old logic.
+  ( \mu_\text{new} < \mu_\text{old} )
+
+We define ignificance level α = 0.05.
 
 #### Measurements
 
@@ -121,9 +135,9 @@ The Test Setup is the same as for the Last experiment: 3 rounds of 10 images eac
 | Metric           |                       Value |
 | ---------------- | --------------------------: |
 | α (significance) |                        0.05 |
-| TTEST p-value    |                 3.58787e-08 |
-| H₀               | Runtime(old) = Runtime(new) |
-| H₁               | Runtime(old) < Runtime(new) |
+| TTEST p-value    |                  |
+| H₀               | \mu_\text{new} \ge \mu_\text{old} |
+| H₁               | \mu_\text{new} < \mu_\text{old} |
 | Decision         |               **Reject H₀** |
 
 #### Conclusion

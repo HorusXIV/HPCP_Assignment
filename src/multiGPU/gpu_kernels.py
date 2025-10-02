@@ -109,12 +109,23 @@ def _adaptive_batch_size(na: int, nf: int, nt: int, nmu: int) -> int:
     """
     default = min(64, na)
     try:  # pragma: no cover
+        # Always clear freeable pool blocks before probing free memory to avoid
+        # basing our estimate on cached-but-unused allocations from a prior image.
+        try:
+            cp.get_default_memory_pool().free_all_blocks()
+            cp.get_default_pinned_memory_pool().free_all_blocks()
+        except Exception:
+            pass
         free_b, _ = cp.cuda.runtime.memGetInfo()  # type: ignore[attr-defined]
         bytes_per = _bytes_per_sample_estimate(nf, nt, nmu)
         if bytes_per <= 0:
             return default
-        # Be conservative to avoid OOM during SVD workspace spikes
-        est = int((free_b * 0.55) // bytes_per)
+        try:
+            frac_env = float(os.environ.get("MULTIGPU_BATCH_MEM_FRAC", "0.75"))
+            mem_frac = float(min(max(frac_env, 0.1), 0.9))
+        except Exception:
+            mem_frac = 0.55
+        est = int((free_b * mem_frac) // bytes_per)
         return max(1, min(est, na))
     except Exception:
         return default
@@ -169,6 +180,11 @@ def estimate_batch_plan(na: int, nf: int, nt: int, nmu: int) -> Dict[str, Any]:
     bps = _bytes_per_sample_estimate(nf, nt, nmu)
     free_b = None
     try:  # pragma: no cover
+        try:
+            cp.get_default_memory_pool().free_all_blocks()
+            cp.get_default_pinned_memory_pool().free_all_blocks()
+        except Exception:
+            pass
         free_b, _ = cp.cuda.runtime.memGetInfo()  # type: ignore[attr-defined]
     except Exception:
         free_b = None
@@ -469,6 +485,61 @@ def demmap_pos(
         )
 
     if _have_cuda_devices():
+        # Configure memory pools to reduce long-lived static allocations and
+        # stabilize per-image memory footprint.
+        with nvtx_range("MEMPOOL_CONFIG", color=0x00695C):
+            try:
+                # Optional: bound the default device memory pool by fraction or bytes.
+                # MULTIGPU_POOL_LIMIT_FRACTION in (0.1..0.95), else ignored.
+                pool = cp.get_default_memory_pool()
+                pin_pool = cp.get_default_pinned_memory_pool()
+                total_b = None
+                try:
+                    _free_b0, _total_b0 = cp.cuda.runtime.memGetInfo()  # type: ignore[attr-defined]
+                    total_b = int(_total_b0)
+                except Exception:
+                    total_b = None
+                limit_bytes = None
+                frac_s = os.environ.get("MULTIGPU_POOL_LIMIT_FRACTION", None)
+                if frac_s is not None and total_b is not None:
+                    try:
+                        frac = float(frac_s)
+                        if 0.1 <= frac <= 0.95:
+                            limit_bytes = int(total_b * frac)
+                    except Exception:
+                        limit_bytes = None
+                if limit_bytes is None:
+                    by_s = os.environ.get("MULTIGPU_POOL_LIMIT_BYTES", None)
+                    if by_s is not None:
+                        try:
+                            limit_bytes = int(by_s)
+                        except Exception:
+                            limit_bytes = None
+                if limit_bytes is not None:
+                    try:
+                        pool.set_limit(limit_bytes)
+                    except Exception:
+                        pass
+                # Apply a similar soft cap to pinned pool: default to 1 GiB or env override.
+                try:
+                    pin_limit_env = os.environ.get("MULTIGPU_PINNED_POOL_LIMIT_BYTES", None)
+                    if pin_limit_env is not None:
+                        pin_pool.set_limit(int(pin_limit_env))
+                    else:
+                        # Modest cap; adjust if your D2H/H2D slices are larger.
+                        pin_pool.set_limit(int(1 * 1024**3))
+                except Exception:
+                    pass
+                # Drop any immediately-freeable blocks before starting the first batch.
+                try:
+                    pool.free_all_blocks()
+                    pin_pool.free_all_blocks()
+                except Exception:
+                    pass
+            except Exception:
+                # Best-effort; failure here is non-fatal.
+                pass
+
         # Replace outputs with pinned (page-locked) host memory to enable fully
         # asynchronous D2H enqueues. Allocate lazily to avoid importing helpers
         # in CPU-only environments.
@@ -549,7 +620,12 @@ def demmap_pos(
                     try:
                         free_b3, _ = cp.cuda.runtime.memGetInfo()  # type: ignore[attr-defined]
                         bps3 = _bytes_per_sample_estimate(nf, nt, nmu)
-                        est3 = int((free_b3 * 0.5) // max(1, bps3))
+                        try:
+                            frac_env = float(os.environ.get("MULTIGPU_BATCH_MEM_FRAC", "0.75"))
+                            mem_frac = float(min(max(frac_env, 0.1), 0.9))
+                        except Exception:
+                            mem_frac = 0.55
+                        est3 = int((free_b3 * mem_frac) // max(1, bps3))
                         new_bs = max(1, min(est3, na))
                     except Exception:
                         new_bs = max(1, batch_size // 2)
@@ -926,8 +1002,13 @@ def demmap_pos(
                     try:
                         free_b2, _ = cp.cuda.runtime.memGetInfo()  # type: ignore[attr-defined]
                         bps2 = _bytes_per_sample_estimate(nf, nt, nmu)
-                        # Reserve ~50% of free mem for workspace/fragmentation
-                        est2 = int((free_b2 * 0.5) // max(1, bps2))
+                        # Use the same configurable fraction for consistency
+                        try:
+                            frac_env = float(os.environ.get("MULTIGPU_BATCH_MEM_FRAC", "0.75"))
+                            mem_frac = float(min(max(frac_env, 0.1), 0.9))
+                        except Exception:
+                            mem_frac = 0.55
+                        est2 = int((free_b2 * mem_frac) // max(1, bps2))
                         attempt2 = max(1, min(est2, na - idx))
                     except Exception:
                         # Fallback to halving when memGetInfo fails
