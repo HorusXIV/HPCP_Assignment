@@ -1,8 +1,8 @@
 """Preemption and signal handling helpers.
 
-Register signal handlers that trigger a user callback (e.g., save a
-checkpoint) and perform a best-effort MPI barrier before exiting with a
-non-zero status so schedulers can resubmit.
+Registers signal handlers that trigger a user callback (e.g., checkpoint) and
+attempt a best-effort MPI barrier before exiting with a non-zero status so
+job schedulers can resubmit.
 """
 
 from __future__ import annotations
@@ -37,11 +37,11 @@ def register_preempt_handlers(
     """Register handlers for preemption/termination signals.
 
     Args:
-        callback: Zero-arg function invoked inside the handler thread.
-        comm: Optional MPI communicator used to attempt a barrier after
-            the callback returns.
-        signals: Optional list of ``signal.SIG*`` to install; defaults to
-            a small cross-platform set.
+      callback: Zero-arg function invoked within the handler thread.
+      comm: Optional MPI communicator used to attempt a barrier after the
+        callback returns.
+      signals: Optional list of ``signal.SIG*``; defaults to SIGTERM/SIGINT
+        and SIGUSR1 when available.
     """
     if signals is None:
         # common scheduler signals: SIGTERM, SIGINT;
@@ -62,12 +62,9 @@ def register_preempt_handlers(
             ),
             file=sys.stderr,
         )
-        # call callback in a separate thread to avoid
-        # signal handler restrictions
         t = threading.Thread(target=_call_callback, args=(callback,))
         t.start()
         t.join(timeout=30.0)
-        # if MPI available, attempt to barrier
         try:
             if comm is not None:
                 comm.Barrier()

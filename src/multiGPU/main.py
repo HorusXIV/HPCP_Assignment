@@ -1,11 +1,11 @@
 """Launch multi-GPU DEM computations with explicit MPI orchestration.
 
-High-level flow
-1) Initialize/broadcast MPI state and map ranks to GPUs.
-2) Rank 0 enumerates inputs and broadcasts the worklist.
-3) For each input, rank 0 loads and scatters rows to all ranks.
-4) Ranks call the GPU kernel once (internal batching), gather DEMs.
-5) Rank 0 saves a single aggregated output per input.
+Flow:
+    1. Initialize/broadcast MPI state and map ranks to GPUs.
+    2. Rank 0 enumerates inputs and broadcasts the worklist.
+    3. For each input, rank 0 loads and scatters rows to all ranks.
+    4. All ranks compute once (internal batching), then gather DEMs.
+    5. Rank 0 saves a single aggregated output per input.
 """
 
 from __future__ import annotations
@@ -29,8 +29,8 @@ from . import logging as mlog
 def parse_args():
     """Parse CLI arguments for the multi-GPU entry point.
 
-    Returns:
-        argparse.Namespace containing the parsed options.
+        Returns:
+            Parsed CLI options.
     """
     p = argparse.ArgumentParser()
     p.add_argument(
@@ -59,20 +59,16 @@ def main():
     """
     args = parse_args()
 
-    # MPI init once
     with nvtx_range("INIT_MPI", color=0x4CAF50):
         comm, rank, size = mmpi.init_mpi()
 
-    # Results root (single aggregate folder, no per-rank files)
     results_root = "data/results_multiGPU"
     log_root = "src/multiGPU/logs"
     if rank == 0:
         os.makedirs(results_root, exist_ok=True)
-    # Logging once
     _ = mlog.setup_logging(log_root, rank=rank, size=size)
     log = logging.getLogger(__name__)
     log.info("Starting rank %d/%d; results dir: %s", rank, size - 1, results_root)
-    # Quick NVTX availability probe so logs reveal whether ranges should appear
     try:
         from src.common.nvtx import nvtx_available as _nvtx_avail
 
@@ -86,7 +82,6 @@ def main():
     except Exception:
         pass
 
-    # Map rank to GPU based on node-local rank
     with nvtx_range("RANK_GPU_BIND", color=0x009688):
         local_rank, local_size, node = mmpi.get_local_rank_info(comm)
         gpu_assigned = mmpi.set_device_for_local_rank(comm)
@@ -98,13 +93,11 @@ def main():
         str(gpu_assigned),
     )
 
-    # Preemption handling (enable via MULTIGPU_PREEMPT=1)
     if os.environ.get("MULTIGPU_PREEMPT", "0") == "1":
         try:
             from . import preempt as _preempt
 
             def _on_preempt_save():
-                # Minimal best-effort marker; production: save real state
                 mark_dir = os.path.join(log_root, "logs")
                 os.makedirs(mark_dir, exist_ok=True)
                 mark = os.path.join(mark_dir, f"preempt_rank{rank:03d}.txt")
@@ -116,13 +109,11 @@ def main():
         except Exception:
             log.warning("Failed to register preemption handlers", exc_info=True)
 
-    # Inputs must be provided
     if not args.input_dir:
         if rank == 0:
             raise RuntimeError("Must specify --input-dir to process input files")
         return
 
-    # Rank 0 enumerates inputs; broadcast list
     with nvtx_range("ENUM_INPUTS", color=0x2196F3):
         if rank == 0:
             pattern = os.path.join(args.input_dir, "*.npz")
@@ -146,7 +137,6 @@ def main():
             extra={"general": True},
         )
 
-    # Iterate inputs: rank 0 loads/scatters; all ranks compute/gather
     for input_path in all_inputs:
         file_label = f"PROCESS_FILE:{os.path.basename(input_path)}"
         with nvtx_range(file_label, color=0xFF9800):
@@ -158,7 +148,6 @@ def main():
                     extra={"general": True},
                 )
             try:
-                # Prepare data on rank 0
                 if rank == 0:
                     with nvtx_range("LOAD_FILE", color=0x8E24AA):
                         data = mio.load_npz(input_path)
@@ -243,7 +232,6 @@ def main():
                     local_edn = edn2d
                     counts = [local_dn.shape[0]]
 
-                # Rank 0: announce pixel distribution so it appears in Slurm .out
                 if rank == 0:
                     try:
                         total_px = int(np.sum(counts)) if counts is not None else 0
@@ -254,7 +242,6 @@ def main():
                             extra={"general": True},
                         )
                     except Exception:
-                        # best-effort; avoid failing the run on logging
                         pass
 
                 # Build simple response matrix (nt x nf)
@@ -264,7 +251,6 @@ def main():
                 dlogt = np.full(nt, logt[1] - logt[0])
                 tresp = np.ones((nt, nf))
 
-                # Verbose rank diagnostics: pixels and memory estimates
                 try:
                     verbose = mlog.verbose_enabled()
                 except Exception:
@@ -292,12 +278,10 @@ def main():
                         str(plan.get("free_bytes")),
                     )
 
-                # Ensure CuPy is present and a GPU is assigned
                 mmpi._require_cupy()
                 if gpu_assigned is None or gpu_assigned < 0:
                     raise RuntimeError("No GPU assigned for multiGPU execution")
 
-                # Compute once; internal batching happens inside demmap_pos
                 with nvtx_range("GPU_COMPUTE", color=0xE65100):
                     (
                         dem_local,
@@ -314,7 +298,6 @@ def main():
                         np.ones((nf,), dtype=float),
                     )
 
-                # Gather results on root
                 if comm is not None:
                     with nvtx_range("GATHER_DEM", color=0x6D4C41):
                         dem_all = mmpi.gatherv_array(comm, dem_local, counts, root=0)
@@ -328,7 +311,6 @@ def main():
                 else:
                     dem_all = dem_local
 
-                # Save on root only
                 if rank == 0 and dem_all is not None:
                     log.info(
                         f"Computed total DEMs: {dem_all.shape[0]}",
@@ -357,9 +339,7 @@ def main():
                         str(compress),
                         dt,
                     )
-                    # Log total image processing duration
                     t_img = time.perf_counter() - t_img_start
-                    # Emit a concise finished marker for Slurm .out
                     log.info(
                         f"Finished processing input {os.path.basename(input_path)} in {t_img:.2f}s",
                         extra={"general": True},
@@ -373,7 +353,6 @@ def main():
                 )
                 raise
 
-    # Final barrier before shutdown
     if comm is not None:
         with nvtx_range("FINAL_BARRIER", color=0x9E9E9E):
             try:
@@ -381,7 +360,6 @@ def main():
             except Exception as e:
                 logging.getLogger(__name__).warning("Final MPI barrier failed: %s", e)
 
-    # Clean shutdown of logging
     with nvtx_range("SHUTDOWN", color=0x9E9E9E):
         mlog.shutdown_logging()
 

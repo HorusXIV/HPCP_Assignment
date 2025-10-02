@@ -1,8 +1,7 @@
 """MPI process and GPU mapping helpers.
 
-Small utilities on top of mpi4py for rank-to-GPU mapping, collective
-operations on 2D arrays, and minimal synchronization helpers suitable for
-HPC batch execution.
+Utilities for rank-to-GPU mapping, byte-precise scatter/gather of 2D arrays,
+and minimal synchronization suitable for HPC batch execution.
 """
 
 from typing import Optional
@@ -35,8 +34,7 @@ def _require_cupy() -> None:
 def init_mpi():
     """Initialize MPI and return a triple ``(comm, rank, size)``.
 
-    Returns a serial-compatible stub when ``mpi4py`` is unavailable to
-    keep local development paths simple.
+    Returns a serial-compatible stub when ``mpi4py`` is unavailable.
     """
     if MPI is None:
         return None, 0, 1
@@ -50,8 +48,8 @@ def init_mpi():
 def get_local_rank_info(comm):
     """Return ``(local_rank, local_size, node_name)`` for this process.
 
-    Prefer a shared-memory split to determine per-node rank/size and
-    fall back to hostname grouping if necessary. In serial mode returns
+    Prefers a shared-memory split to determine per-node rank/size and falls
+    back to hostname grouping if necessary. In serial mode returns
     ``(0, 1, hostname)``.
     """
     import socket
@@ -61,7 +59,6 @@ def get_local_rank_info(comm):
 
     node = MPI.Get_processor_name()
 
-    # Prefer Split_type for robust locality detection
     try:
         local_comm = comm.Split_type(MPI.COMM_TYPE_SHARED, 0)
         local_rank = local_comm.Get_rank()
@@ -72,7 +69,6 @@ def get_local_rank_info(comm):
             pass
         return local_rank, local_size, node
     except Exception:
-        # Fallback: hostname-based grouping
         all_nodes = comm.allgather(node)
         local_indices = [i for i, n in enumerate(all_nodes) if n == node]
         local_size = len(local_indices)
@@ -82,7 +78,7 @@ def get_local_rank_info(comm):
 
 
 def scatterv_array(comm, array, counts, dtype=None):
-    """Scatter rows of a 2D array across ranks using byte-precise MPI calls.
+    """Scatter rows of a 2D array across ranks using byte counts.
 
     Args:
         comm: MPI communicator.
@@ -134,7 +130,6 @@ def scatterv_array(comm, array, counts, dtype=None):
     sendbuf_bytes = flat.view(_np.uint8) if flat is not None else None
     recvbuf_bytes = recvbuf.view(_np.uint8)
 
-    # use MPI.BYTE so counts are in bytes and avoid mismatched datatypes
     try:
         from src.common.nvtx import nvtx_range  # lazy import
     except Exception:
@@ -174,7 +169,6 @@ def gatherv_array(comm, local_array, counts, root=0):
     itemsize = int(_np.dtype(local_array.dtype).itemsize)
 
     sendcounts_bytes = [int(c * cols * itemsize) for c in counts]
-    # compute byte displacements for each rank
     displs_bytes = []
     for i in range(len(sendcounts_bytes)):
         displs_bytes.append(int(sum(sendcounts_bytes[:i])))
@@ -272,7 +266,17 @@ def set_device_for_local_rank(comm, prefer_visible=True):
 
 
 def map_rank_to_gpu(rank: int, gpus_per_node: Optional[int] = None) -> int:
-    """Return a cyclic mapping from rank to local GPU index."""
+    """Map a global rank to a local GPU index in a cyclic fashion.
+
+    Args:
+        rank: Global MPI rank (0-based).
+        gpus_per_node: Optional number of GPUs per node. Defaults to the
+            detected device count when available.
+
+    Returns:
+        Local GPU index in ``[0, gpus_per_node)`` or ``-1`` when no GPUs are
+        available.
+    """
     try:
         if cp is not None:
             n_gpus = cp.cuda.runtime.getDeviceCount()
@@ -291,9 +295,15 @@ def map_rank_to_gpu(rank: int, gpus_per_node: Optional[int] = None) -> int:
 
 
 def bind_gpu(gpu_index: int):
-    """Set ``CUDA_VISIBLE_DEVICES`` to bind the process to a GPU.
+    """Bind the current process to a specific GPU via CUDA_VISIBLE_DEVICES.
 
-    The caller should still activate the device in CuPy/Numba when needed.
+    Args:
+        gpu_index: Non-negative device index to expose to the process. If
+            negative, the call is a no-op.
+
+    Notes:
+        The caller is responsible for activating the device in CuPy/Numba
+        if necessary.
     """
     if gpu_index < 0:
         return
@@ -301,7 +311,11 @@ def bind_gpu(gpu_index: int):
 
 
 def barrier(comm):
-    """Synchronize all ranks if MPI is available."""
+    """Synchronize all ranks if MPI is available.
+
+    Args:
+        comm: MPI communicator or ``None`` for serial mode.
+    """
     if comm is None:
         return
     try:

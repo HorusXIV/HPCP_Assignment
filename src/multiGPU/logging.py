@@ -1,14 +1,17 @@
 """Rank-aware logging utilities for the multi-GPU solver.
 
-Provides simple, robust logging per MPI rank without background queue
-threads. This minimizes shutdown hazards on some platforms and keeps Slurm
-outputs tidy by limiting console logs to rank 0.
+Provides simple, robust logging per MPI rank and optional rank-0 console
+output. The implementation avoids background queue threads to minimize
+shutdown hazards and keeps cluster logs tidy by default.
 
-Environment controls:
-- MULTIGPU_LOG_LEVEL: Global level (e.g., INFO/DEBUG). Default WARNING.
-- MULTIGPU_VERBOSE: When set > 0, enables extra metrics and also forces
-    per-rank file logging regardless of quiet mode.
-- MULTIGPU_RANK_FILES: If set to 1, enables per-rank file logging.
+Environment variables:
+    MULTIGPU_LOG_LEVEL: Global level name (e.g., INFO, DEBUG). Default:
+        WARNING.
+    MULTIGPU_VERBOSE: If set to an integer > 0, enables extra metrics and
+        forces per-rank file logging.
+    MULTIGPU_RANK_FILES: If set to "1", enables per-rank file logging.
+    MULTIGPU_QUIET: If "1" (default) and level >= WARNING, suppress per-rank
+        files unless overridden by MULTIGPU_VERBOSE or MULTIGPU_RANK_FILES.
 """
 
 from __future__ import annotations
@@ -19,14 +22,14 @@ import os
 import sys
 from typing import Optional
 
-_listener: Optional[logging.handlers.QueueListener] = None  # API compat
+_listener: Optional[logging.handlers.QueueListener] = None
 
 
 class RankFilter(logging.Filter):
-    """Attach the MPI rank to log records.
+    """Attach the MPI rank to each log record.
 
     Args:
-        rank: Integer MPI rank to record as ``record.rank``.
+      rank: MPI rank used to populate ``record.rank`` when missing.
     """
 
     def __init__(self, rank: int):
@@ -34,16 +37,15 @@ class RankFilter(logging.Filter):
         self.rank = rank
 
     def filter(self, record: logging.LogRecord) -> bool:
-        # attach rank to record for formatting
         record.rank = getattr(record, "rank", self.rank)
         return True
 
 
 class ConsoleFilter(logging.Filter):
-    """Filter console messages to warnings/errors or "general" records.
+    """Filter console output to warnings/errors or explicitly general records.
 
-    To mark a message as general (shown on rank 0 console), log with
-    ``extra={"general": True}``.
+    Messages with ``extra={"general": True}`` will be shown on rank 0 even
+    if they are below WARNING.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -53,18 +55,14 @@ class ConsoleFilter(logging.Filter):
 
 
 def _make_formatter():
-    """Return a formatter that tolerates missing ``rank`` attribute."""
+    """Return a formatter that tolerates a missing ``rank`` attribute."""
     fmt = (
         "%(asctime)s - rank=%(rank)s - %(levelname)s - %(name)s - %(message)s"
     )
 
-    # Use a SafeFormatter that provides a default for missing fields like
-    # `rank`.
-
     class SafeFormatter(logging.Formatter):
         def format(self, record: logging.LogRecord) -> str:
             if not hasattr(record, "rank"):
-                # attach a safe default if missing
                 setattr(record, "rank", "-")
             return super().format(record)
 
@@ -72,7 +70,7 @@ def _make_formatter():
 
 
 def verbose_enabled() -> bool:
-    """Return True if verbose multiGPU metrics logging is enabled via env."""
+    """Return whether verbose logging is enabled via MULTIGPU_VERBOSE."""
     try:
         return int(os.environ.get("MULTIGPU_VERBOSE", "0")) > 0
     except Exception:
@@ -85,35 +83,29 @@ def setup_logging(
     """Initialize per-rank logging and optional rank-0 console output.
 
     Args:
-        results_dir: Directory under which a ``logs/`` subfolder will be
-            created for per-rank logs when enabled.
-        rank: MPI rank id.
-        size: MPI world size (unused; reserved for API stability).
-        console: If True, stream to stdout on rank 0.
+      results_dir: Directory where a ``rank_logs/`` subfolder will be created
+        when per-rank files are enabled.
+      rank: MPI rank id.
+      size: MPI world size. Reserved for API stability; not used.
+      console: Whether to stream to stdout on rank 0.
 
     Returns:
-        The configured root logger.
+      The configured root logger (root namespace).
     """
     os.makedirs(results_dir, exist_ok=True)
     root = logging.getLogger()
 
-    # Remove existing handlers to avoid duplicates in interactive sessions
     for h in list(root.handlers):
         try:
             root.removeHandler(h)
         except Exception:
             pass
 
-    # Configure log levels
-    # We keep the root logger open (NOTSET) so handler-level filters decide
-    # what is emitted. This allows rank-0 "general" INFO messages to appear
-    # on the console even when the global level is WARNING.
     _lvl_name = os.environ.get("MULTIGPU_LOG_LEVEL", "WARNING").upper()
     _lvl = getattr(logging, _lvl_name, logging.WARNING)
     root.setLevel(logging.NOTSET)
     root.addFilter(RankFilter(rank))
 
-    # Per-rank file handler (disabled in quiet mode unless forced)
     quiet_mode = (
         _lvl >= logging.WARNING
         and os.environ.get("MULTIGPU_QUIET", "1") == "1"
@@ -132,10 +124,8 @@ def setup_logging(
         fh_rank.addFilter(RankFilter(rank))
         root.addHandler(fh_rank)
 
-    # console for rank 0 only (keeps cluster logs tidy)
     if console and rank == 0:
         sh = logging.StreamHandler(stream=sys.stdout)
-    # INFO-level records on console with ConsoleFilter
         sh.setLevel(logging.INFO)
         sh.setFormatter(_make_formatter())
         sh.addFilter(RankFilter(rank))
