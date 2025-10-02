@@ -8,6 +8,7 @@ import numpy as np
 import logging
 import subprocess
 import os
+import gc
 
 from src.common.dataio import default_files
 from src.common.profiling import (
@@ -121,6 +122,22 @@ def _parse_tile_arg(tile: Union[str, Tuple[int, int], None]) -> Tuple[int, int]:
     v = int(s)
     return v, v
 
+def _free_gpu_memory():
+    """Forcefully release GPU memory (CuPy + Numba)."""
+    try:
+        import cupy as cp
+        cp.cuda.Stream.null.synchronize()
+        cp.get_default_memory_pool().free_all_blocks()
+        cp.get_default_pinned_memory_pool().free_all_blocks()
+    except Exception:
+        pass
+    try:
+        from numba import cuda
+        cuda.current_context().deallocations.clear()
+    except Exception:
+        pass
+    gc.collect()
+
 
 def run_benchmark_single_gpu(
     *,
@@ -228,6 +245,7 @@ def run_benchmark_single_gpu(
         # Try batch GPU path first (pass entire stack). If it fails, fall back to per-frame GPU or CPU.
         frame_t0 = time.perf_counter()
         try:
+            _free_gpu_memory()
             # solve_tile_all_single_gpu accepts (F,H,W,6) or (H,W,6) and will use CuPy if available.
             _dem, _edem, _chisq, logT_centers = solve_tile_all_single_gpu(stack, nmu=nmu)
             # If returned single-frame shapes (shouldn't for batched input) coerce
@@ -280,6 +298,7 @@ def run_benchmark_single_gpu(
                 else:
                     log.info("[singleGPU] frame %d done: time=%.3fs tiles/frame=%d ms/tile=%.2f",
                              fi, frame_dt_f, tiles_per_frame, ms_per_tile)
+                _free_gpu_memory()
 
         frame_dt = time.perf_counter() - frame_t0
 
