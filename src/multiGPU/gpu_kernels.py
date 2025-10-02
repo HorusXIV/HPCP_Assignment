@@ -112,7 +112,7 @@ def _adaptive_batch_size(na: int, nf: int, nt: int, nmu: int) -> int:
         if bytes_per <= 0:
             return default
         try:
-            frac_env = float(os.environ.get("MULTIGPU_BATCH_MEM_FRAC", "0.75"))
+            frac_env = float(os.environ.get("MULTIGPU_BATCH_MEM_FRAC", "0.7"))
             mem_frac = float(min(max(frac_env, 0.1), 0.9))
         except Exception:
             mem_frac = 0.55
@@ -580,7 +580,7 @@ def demmap_pos(
                         free_b3, _ = cp.cuda.runtime.memGetInfo()  # type: ignore[attr-defined]
                         bps3 = _bytes_per_sample_estimate(nf, nt, nmu)
                         try:
-                            frac_env = float(os.environ.get("MULTIGPU_BATCH_MEM_FRAC", "0.75"))
+                            frac_env = float(os.environ.get("MULTIGPU_BATCH_MEM_FRAC", "0.7"))
                             mem_frac = float(min(max(frac_env, 0.1), 0.9))
                         except Exception:
                             mem_frac = 0.55
@@ -944,7 +944,7 @@ def demmap_pos(
                         bps2 = _bytes_per_sample_estimate(nf, nt, nmu)
                         # Use the same configurable fraction for consistency
                         try:
-                            frac_env = float(os.environ.get("MULTIGPU_BATCH_MEM_FRAC", "0.75"))
+                            frac_env = float(os.environ.get("MULTIGPU_BATCH_MEM_FRAC", "0.7"))
                             mem_frac = float(min(max(frac_env, 0.1), 0.9))
                         except Exception:
                             mem_frac = 0.55
