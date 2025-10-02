@@ -95,9 +95,9 @@ The Test Setup is the same as for the Last experiment: 3 rounds of 10 images eac
 
 #### Hypotheses
 * **H₀ (null):** The mean time with the new memory handling logic is **not lower** than with the old logic.
-  ( $$ \mu_\text{new} \ge \mu_\text{old} $$ )
+  ( $$\mu_\text{new} \ge \mu_\text{old}$$ )
 * **H₁ (alt, one-sided):** The mean time with the new memory handling logic is **lower** than with the old logic.
-  ( $$ \mu_\text{new} < \mu_\text{old} $$ )
+  ( $$\mu_\text{new} < \mu_\text{old}$$ )
 
 We define ignificance level α = 0.05.
 
@@ -136,8 +136,8 @@ We define ignificance level α = 0.05.
 | ---------------- | --------------------------: |
 | α (significance) |                        0.05 |
 | TTEST p-value    |                  |
-| H₀               | $$ \mu_\text{new} \ge \mu_\text{old} $$ |
-| H₁               | $$ \mu_\text{new} < \mu_\text{old} $$ |
+| H₀               | $$\mu_\text{new} \ge \mu_\text{old}$$ |
+| H₁               | $$\mu_\text{new} < \mu_\text{old}$$ |
 | Decision         |               **Reject H₀** |
 
 #### Conclusion
