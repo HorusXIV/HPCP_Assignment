@@ -89,7 +89,7 @@ The measurements show that the triple‑buffering implementation has a lower ave
 
 This was encouraging, but there was still a problem: out‑of‑memory (OOM) errors occurred frequently, especially with larger images or higher μ‑grid points. Each OOM triggered a retry with a smaller batch (reducing the batch size by half each time), but this wasted time and hurt throughput.
 
-There were multiple approaches to improve this (for example, statically reducing the number of μ‑grid points), but I wanted to keep vendor parity as high as possible. So I focused on improving the memory‑handling logic. Previously, after each OOM, the batch size was simply halved. The new approach is more robust: flush reclaimable pool blocks before sizing so the estimate reflects real free memory; set the target fraction of free memory to 0.75 by default (tunable via the `MULTIGPU_BATCH_MEM_FRAC` environment variable) to leave headroom for library overhead.
+There were multiple approaches to improve this (for example, statically reducing the number of μ‑grid points), but I wanted to keep vendor parity as high as possible. So I focused on improving the memory‑handling logic. Previously, after each OOM, the batch size was simply halved. The new approach is more robust: flush reclaimable pool blocks before sizing so the estimate reflects real free memory; set the target fraction of free memory to 0.7 by default (tunable via the `MULTIGPU_BATCH_MEM_FRAC` environment variable) to leave headroom for library overhead.
 
 
 ### Experiment 2: Memory‑Handling Logic
@@ -108,7 +108,7 @@ We define the significance level α = 0.05.
 
 Time in seconds per image:
 
-|  # | Old Version | Newest Version |
+|  # | Old Version |    New Version |
 | -: | ----------: | -------------: |
 |  1 |       29.27 |          22.92 |
 |  2 |       29.50 |          23.65 |
@@ -142,7 +142,6 @@ Time in seconds per image:
 | α (significance) |                        0.05 |
 | p-value          |    $$3.671\mathrm{e}{-08}$$ |
 | H₀               | $$\mu_\text{new} \ge \mu_\text{old}$$ |
-| H₁               | $$\mu_\text{new} < \mu_\text{old}$$ |
 | Decision         |               **Reject H₀** |
 
 #### Conclusion
