@@ -4,29 +4,35 @@
 #SBATCH --job-name=Performance_SingleGPU
 #SBATCH --mem=128G
 #SBATCH --cpus-per-task=2
-# Uncomment if you need GPUs:
 #SBATCH --gres=gpu:1
 
 set -euo pipefail
 
-# Use the directory you submit the job from as the project root
+# Repo and environment
 REPO_DIR="${REPO_DIR:-$SLURM_SUBMIT_DIR}"
-IMAGE="${IMAGE:-$REPO_DIR/containers/python_poetry.sif}"
-
+ENV_DIR="${ENV_DIR:-$REPO_DIR/env/HPCP}"
 ENTRY="${ENTRY:-src.singleGPU.main}"
 
-echo "[SLURM] Using image: $IMAGE"
-echo "[SLURM] Repo dir:   $REPO_DIR"
-echo "[SLURM] Entry:      $ENTRY"
+# Activate environment
+if [ -f "$ENV_DIR/bin/activate" ]; then
+  source "$ENV_DIR/bin/activate"
+else
+  echo "[SLURM][ERROR] Conda env not found at $ENV_DIR"
+  exit 1
+fi
 
+cd "$REPO_DIR"
+
+# Optional: set OMP threads to match SLURM allocation
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}
 export PYTHONUNBUFFERED=1
 
-singularity exec --cleanenv --nv \
-  --bind "$REPO_DIR":/workspace \
-  "$IMAGE" bash -lc "
-    set -euo pipefail
-    cd /workspace
-    poetry install --no-interaction --no-ansi
-    poetry run python -m \"$ENTRY\"
-"
+# Run single-GPU benchmark
+python -m "$ENTRY" \
+    --data-dir "data/np32" \
+    --sizes "4096x4096" \
+    --tile "256" \
+    --nmu 42 \
+    --bench-root "benchmark_results" \
+    --device "${CUDA_VISIBLE_DEVICES:-0}" \
+    ${ARGS:-}
