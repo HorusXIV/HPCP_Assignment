@@ -37,9 +37,9 @@ To avoid additional variability, I kept the batch size constant at 198759 for bo
 
 #### Hypotheses
 * **H₀ (null):** The mean time with triple buffering is **not lower** than with double buffering.
-  ( \mu_\text{triple} \ge \mu_\text{double} )
+  ( $$\mu_\text{triple} \ge \mu_\text{double} $$ )
 * **H₁ (alt, one-sided):** The mean time with triple buffering is **lower** than with double buffering.
-  ( \mu_\text{triple} < \mu_\text{double} )
+  ( $$\mu_\text{triple} < \mu_\text{double} $$ )
 
 We define ignificance level α = 0.05.
 
@@ -76,8 +76,8 @@ We define ignificance level α = 0.05.
 
 | Metric       | α (p-value threshold) | Welch’s t-test p-value | H₀ (null)                                   | Decision              |
 | ------------ | --------------------: | ---------------------: | ------------------------------------------- | --------------------- |
-| Wall Time    |                  0.05 |              0.0002424 | \mu_\text{triple} \ge \mu_\text{double}     | **Reject H₀**         |
-| Compute Time |                  0.05 |                0.04911 | \mu_\text{triple} \ge \mu_\text{double}     | **Reject H₀**         |
+| Wall Time    |                  0.05 |              0.0002424 | $$\mu_\text{triple} \ge \mu_\text{double} $$    | **Reject H₀**         |
+| Compute Time |                  0.05 |                0.04911 | $$\mu_\text{triple} \ge \mu_\text{double} $$    | **Reject H₀**         |
 
 #### Conclusion
 The measurements show that the triple buffering implementation has a lower average wall time per image compared to the double buffering implementation. The t-test for both, wall time and compute yield p-values lower than 0.05, leading to the rejection of the null hypothesis. This indicates that there is a statistically significant difference in both measured metrics between the two implementations, with triple buffering being faster, the implementation with triple buffering is therefore preferred.
@@ -95,9 +95,9 @@ The Test Setup is the same as for the Last experiment: 3 rounds of 10 images eac
 
 #### Hypotheses
 * **H₀ (null):** The mean time with the new memory handling logic is **not lower** than with the old logic.
-  ( \mu_\text{new} \ge \mu_\text{old} )
+  ( $$ \mu_\text{new} \ge \mu_\text{old} $$ )
 * **H₁ (alt, one-sided):** The mean time with the new memory handling logic is **lower** than with the old logic.
-  ( \mu_\text{new} < \mu_\text{old} )
+  ( $$ \mu_\text{new} < \mu_\text{old} $$ )
 
 We define ignificance level α = 0.05.
 
@@ -136,8 +136,8 @@ We define ignificance level α = 0.05.
 | ---------------- | --------------------------: |
 | α (significance) |                        0.05 |
 | TTEST p-value    |                  |
-| H₀               | \mu_\text{new} \ge \mu_\text{old} |
-| H₁               | \mu_\text{new} < \mu_\text{old} |
+| H₀               | $$ \mu_\text{new} \ge \mu_\text{old} $$ |
+| H₁               | $$ \mu_\text{new} < \mu_\text{old} $$ |
 | Decision         |               **Reject H₀** |
 
 #### Conclusion
