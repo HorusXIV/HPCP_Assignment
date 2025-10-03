@@ -1,4 +1,3 @@
-# flake8: noqa: E501
 """
 GPU-accelerated kernels for DEM inversion, mirroring vendor behavior with
 OOM-aware batching on the GPU path and vendor-parity per-sample fallback.
