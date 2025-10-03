@@ -37,9 +37,9 @@ Almost all previous changes yielded clear improvements, so the focused experimen
 To avoid additional variability, I kept the batch size constant at 198'759 for both implementations. Another way to improve test reliability would have been to pin the SLURM job to a specific node, but I decided against it due to uncertainty about scheduling behavior on our cluster.
 
 #### Hypotheses
-* **H₀ (null):** The mean time with triple buffering is **not lower** than with double buffering.
+* **$$H_0$$:** The mean time with triple buffering is **not lower** than with double buffering.
   ( $$\mu_\text{triple} \ge \mu_\text{double} $$ )
-* **H₁ (alt, one-sided):** The mean time with triple buffering is **lower** than with double buffering.
+* **$$H_1$$:** The mean time with triple buffering is **lower** than with double buffering.
   ( $$\mu_\text{triple} < \mu_\text{double} $$ )
 
 We define the significance level α = 0.05.
@@ -49,7 +49,7 @@ We define the significance level α = 0.05.
 Time in seconds per image:
 
 |  # | Double Buffer – Time/image | Double Buffer – Compute  | Triple Buffer – Time/image | Triple Buffer – Compute |
-| -: | -------------------------: | ------------------------ | -------------------------: | ----------------------: |
+| -: | -------------------------: | -----------------------: | -------------------------: | ----------------------: |
 |  1 |                      24.68 |                   16.905 |                      24.26 |                  16.727 |
 |  2 |                      24.68 |                   17.052 |                      24.29 |                  16.853 |
 |  3 |                      24.92 |                   17.125 |                      24.40 |                  16.953 |
@@ -77,10 +77,10 @@ Time in seconds per image:
 
 #### Hypothesis test summary
 
-| Metric       | α (p-value threshold) | Welch’s t-test p-value | H₀ (null)                                       | Decision              |
-| ------------ | --------------------: | ---------------------: | ----------------------------------------------: | --------------------- |
-| Wall Time    |                  0.05 |              0.0002424 | $$\mu_\text{triple} \ge \mu_\text{double} $$    | **Reject H₀**           |
-| Compute Time |                  0.05 |                0.04911 | $$\mu_\text{triple} \ge \mu_\text{double} $$    | **Reject H₀**           |
+| Metric       | α (p-value threshold) | Welch’s t-test p-value | **$$H_0$$:**                                    | Decision                |
+| ------------ | --------------------: | ---------------------: | ----------------------------------------------: | ----------------------- |
+| Wall Time    |                  0.05 |              0.0002424 | $$\mu_\text{triple} \ge \mu_\text{double} $$    | **Reject $$H_0$$**           |
+| Compute Time |                  0.05 |                0.04911 | $$\mu_\text{triple} \ge \mu_\text{double} $$    | **Reject $$H_0$$**           |
 
 #### Conclusion
 The measurements show that the triple‑buffering implementation has a lower average wall time per image than the double‑buffering implementation. The t‑tests for both wall time and compute time yield p‑values below 0.05, leading to rejection of the null hypothesis. This indicates a statistically significant difference in both metrics, with triple buffering being faster; therefore, the triple‑buffered implementation is preferred.
@@ -97,16 +97,16 @@ There were multiple approaches to improve this (for example, statically reducing
 The test setup matches the previous experiment: 3 rounds of 10 images each, measuring wall time. I discarded the first two rounds (warm‑up) and performed a one‑sided Welch’s t‑test on the remaining data. Again, all data were collected from NVIDIA Nsight reports.
 
 #### Hypotheses
-* **H₀ (null):** The newest memory handling is **not faster** than the old version.
+* **$$H_0$$:** The newest memory handling is **not faster** than the old version.
   ( $$\mu_\text{new} \ge \mu_\text{old}$$ )
-* **H₁ (alt, one-sided):** The newest memory handling is **faster** (lower mean time).
+* **$$H_1$$:** The newest memory handling is **faster** (lower mean time).
   ( $$\mu_\text{new} < \mu_\text{old}$$ )
 
 We define the significance level α = 0.05.
 
 #### Measurements
 
-Time in seconds per image:
+Time in seconds per image. Even though this is the never version rather than the last test, I didn't fix the batch size, which led to a higher processing time per Image. Additionally, you can see that some servers take much longer than others.
 
 |  # | Old Version |    New Version |
 | -: | ----------: | -------------: |
@@ -142,7 +142,7 @@ Time in seconds per image:
 | α (significance) |                        0.05 |
 | p-value          |    $$3.671\mathrm{e}{-08}$$ |
 | H₀               | $$\mu_\text{new} \ge \mu_\text{old}$$ |
-| Decision         |               **Reject H₀** |
+| Decision         |               **Reject $$H_0$$** |
 
 #### Conclusion
 The measurements show that the new memory‑handling logic has a lower average wall time per image than the old implementation. The t‑test yields a p‑value of $$3.671\mathrm{e}{-08}$$, which is far below the significance level of 0.05, leading to rejection of the null hypothesis. This indicates a statistically significant difference in wall time between the two implementations, with the new memory‑handling logic being faster.
