@@ -11,7 +11,6 @@ Flow:
 from __future__ import annotations
 
 # pylint: disable=line-too-long
-# flake8: noqa: E501
 
 import argparse
 import logging
