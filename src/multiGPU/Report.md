@@ -77,10 +77,10 @@ Time in seconds per image:
 
 #### Hypothesis test summary
 
-| Metric       | α (p-value threshold) | Welch’s t-test p-value | **$$H_0$$:**                                    | Decision                |
+| Metric       | α (p-value threshold) | Welch’s t-test p-value | $$\mathbf{H_0}$$                                | Decision                |
 | ------------ | --------------------: | ---------------------: | ----------------------------------------------: | ----------------------- |
-| Wall Time    |                  0.05 |              0.0002424 | $$\mu_\text{triple} \ge \mu_\text{double} $$    | **Reject $$H_0$$**           |
-| Compute Time |                  0.05 |                0.04911 | $$\mu_\text{triple} \ge \mu_\text{double} $$    | **Reject $$H_0$$**           |
+| Wall Time    |                  0.05 |              0.0002424 | $$\mu_\text{triple} \ge \mu_\text{double} $$    | **Reject $$H_0$$**      |
+| Compute Time |                  0.05 |                0.04911 | $$\mu_\text{triple} \ge \mu_\text{double} $$    | **Reject $$H_0$$**      |
 
 #### Conclusion
 The measurements show that the triple‑buffering implementation has a lower average wall time per image than the double‑buffering implementation. The t‑tests for both wall time and compute time yield p‑values below 0.05, leading to rejection of the null hypothesis. This indicates a statistically significant difference in both metrics, with triple buffering being faster; therefore, the triple‑buffered implementation is preferred.
