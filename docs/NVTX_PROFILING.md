@@ -33,13 +33,13 @@ poetry install --with profiling
 ```
 2. Export environment variable (shell or inside Slurm script):
 ```bash
-export MULTIGPU_NVTX=1
+export MULTIGPU_NVTX=1  # note: the Slurm launcher auto-sets this when PROFILE=1 unless you override it
 ```
 3. (Optional) Enable Nsight Systems profiling: set `PROFILE=1` in the Slurm optimized script or run `nsys` manually.
 
 The Slurm script accepts:
 ```bash
-sbatch --export=ALL,MULTIGPU_NVTX=1,PROFILE=1 hpc/slurm_run_multiGPU.sh
+sbatch --export=ALL,PROFILE=1 hpc/slurm_run_multiGPU.sh   # MULTIGPU_NVTX auto-enabled unless you set it yourself
 ```
 
 ## Running Locally with Nsight Systems
@@ -50,6 +50,14 @@ MULTIGPU_NVTX=1 nsys profile -t cuda,nvtx,osrt -o nsys_run \
 ```
 
 Afterward open `nsys_run.qdrep` in Nsight Systems GUI.
+
+## Python-level sampling profiler (pyinstrument)
+For quick, low-overhead Python call-stack profiling (not GPU timelines), you can enable `PYPROFILE=1` in the Slurm launcher. It writes an interactive HTML report to `src/multiGPU/logs/profile.html`.
+
+Example:
+```bash
+sbatch --export=ALL,PROFILE=0,PYPROFILE=1 hpc/slurm_run_multiGPU.sh
+```
 
 ## Coloring
 Distinct hexadecimal RGB colors are assigned to major phases for visual grouping. Adjust if needed by editing `src/multiGPU/main.py` color arguments.
@@ -100,6 +108,8 @@ Keep labels concise (< 48 chars) and reuse colors for logical groups.
 | Symptom | Cause | Action |
 |---------|-------|--------|
 | No NVTX ranges in nsys timeline | `MULTIGPU_NVTX` unset or `nvtx` pkg missing | Set `MULTIGPU_NVTX=1` and install profiling extras |
+| Nsight Systems not collecting | `nsys` CLI missing in container | Rebuild image with Nsight CLI or run without PROFILE |
+| Want Python hotspots, not GPU timeline | Nsight focuses on system & CUDA timeline | Use `PYPROFILE=1` for pyinstrument HTML profile |
 | Ranges appear only for some ranks | Ranks launched without exported env var | Ensure `--export=ALL,MULTIGPU_NVTX=1` in `srun` |
 | Excessive timeline clutter | Over-instrumentation | Disable fine-grained (comment or regroup) |
 | ImportError for `nvtx` | Optional dep not installed | `poetry install --with profiling` |

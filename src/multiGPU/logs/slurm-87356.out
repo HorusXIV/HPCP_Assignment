@@ -1,0 +1,109 @@
+[OPT][87356] Job on nodes: server0092
+[OPT][87356] MPI tasks: 4  GPUs/task: 1  CPUs/task: 3
+[OPT][87356] GPU inventory:
+index, name, memory.total [MiB], pci.bus_id
+0, NVIDIA GeForce RTX 2080 Ti, 11264 MiB, 00000000:21:00.0
+1, NVIDIA GeForce RTX 2080 Ti, 11264 MiB, 00000000:22:00.0
+2, NVIDIA GeForce RTX 2080 Ti, 11264 MiB, 00000000:42:00.0
+3, NVIDIA GeForce RTX 2080 Ti, 11264 MiB, 00000000:61:00.0
+[OPT][87356] GPU topology for large image processing optimization:
+	[4mGPU0	GPU1	GPU2	GPU3	CPU Affinity	NUMA Affinity	GPU NUMA ID[0m
+GPU0	 X 	PHB	SYS	SYS	8-11,40-43	1		N/A
+GPU1	PHB	 X 	SYS	SYS	8-11,40-43	1		N/A
+GPU2	SYS	SYS	 X 	SYS			N/A		N/A
+GPU3	SYS	SYS	SYS	 X 		3		N/A
+
+Legend:
+
+  X    = Self
+  SYS  = Connection traversing PCIe as well as the SMP interconnect between NUMA nodes (e.g., QPI/UPI)
+  NODE = Connection traversing PCIe as well as the interconnect between PCIe Host Bridges within a NUMA node
+  PHB  = Connection traversing PCIe as well as a PCIe Host Bridge (typically the CPU)
+  PXB  = Connection traversing multiple PCIe bridges (without traversing the PCIe Host Bridge)
+  PIX  = Connection traversing at most a single PCIe bridge
+  NV#  = Connection traversing a bonded set of # NVLinks
+Installing dependencies from lock file
+
+No dependencies to install or update
+
+Installing the current project: hpcp-assignment (0.1.0)
+[OPT][87356] Nsight Systems enabled (cuda,nvtx,osrt,cublas,cusolver); output: /mnt/nas05/clusterdata01/home2/lukas.breiter/HPCP_Assignment/src/multiGPU/logs/nsys
+[OPT][87356] Config: LOG_LEVEL=INFO VERBOSE=1 PROFILE=1 NVTX=1 BATCH_SIZE=0
+2025-10-02 09:56:24,218 - rank=0 - INFO - __main__ - Processing 10 input files across 4 ranks
+2025-10-02 09:56:24,219 - rank=0 - INFO - __main__ - Starting processing input 20170906_12_00_12.npz
+2025-10-02 09:56:26,602 - rank=0 - INFO - __main__ - Pixels per rank (total=16777216): [4194304, 4194304, 4194304, 4194304]
+2025-10-02 09:56:33,013 - rank=0 - WARNING - src.multiGPU.gpu_kernels - [metrics] OOM: reducing batch 607740 -> 112457
+2025-10-02 09:56:50,286 - rank=0 - INFO - __main__ - Computed total DEMs: 16777216
+2025-10-02 09:56:54,781 - rank=0 - INFO - __main__ - Finished processing input 20170906_12_00_12.npz in 30.56s
+2025-10-02 09:56:54,782 - rank=0 - INFO - __main__ - Starting processing input 20170906_12_00_36.npz
+2025-10-02 09:56:57,150 - rank=0 - INFO - __main__ - Pixels per rank (total=16777216): [4194304, 4194304, 4194304, 4194304]
+2025-10-02 09:57:01,574 - rank=0 - WARNING - src.multiGPU.gpu_kernels - [metrics] OOM: reducing batch 399969 -> 24097
+2025-10-02 09:57:17,999 - rank=0 - INFO - __main__ - Computed total DEMs: 16777216
+2025-10-02 09:57:22,621 - rank=0 - INFO - __main__ - Finished processing input 20170906_12_00_36.npz in 27.84s
+2025-10-02 09:57:22,622 - rank=0 - INFO - __main__ - Starting processing input 20170906_12_01_00.npz
+2025-10-02 09:57:24,997 - rank=0 - INFO - __main__ - Pixels per rank (total=16777216): [4194304, 4194304, 4194304, 4194304]
+2025-10-02 09:57:27,418 - rank=0 - WARNING - src.multiGPU.gpu_kernels - [metrics] OOM: reducing batch 565203 -> 28463
+2025-10-02 09:57:45,164 - rank=0 - INFO - __main__ - Computed total DEMs: 16777216
+2025-10-02 09:57:49,825 - rank=0 - INFO - __main__ - Finished processing input 20170906_12_01_00.npz in 27.20s
+2025-10-02 09:57:49,825 - rank=0 - INFO - __main__ - Starting processing input 20170906_12_01_24.npz
+2025-10-02 09:57:52,212 - rank=0 - INFO - __main__ - Pixels per rank (total=16777216): [4194304, 4194304, 4194304, 4194304]
+2025-10-02 09:57:54,641 - rank=0 - WARNING - src.multiGPU.gpu_kernels - [metrics] OOM: reducing batch 557313 -> 35428
+2025-10-02 09:58:12,520 - rank=0 - INFO - __main__ - Computed total DEMs: 16777216
+2025-10-02 09:58:17,131 - rank=0 - INFO - __main__ - Finished processing input 20170906_12_01_24.npz in 27.31s
+2025-10-02 09:58:17,131 - rank=0 - INFO - __main__ - Starting processing input 20170906_12_01_48.npz
+2025-10-02 09:58:19,537 - rank=0 - INFO - __main__ - Pixels per rank (total=16777216): [4194304, 4194304, 4194304, 4194304]
+2025-10-02 09:58:21,831 - rank=0 - WARNING - src.multiGPU.gpu_kernels - [metrics] OOM: reducing batch 520035 -> 69733
+2025-10-02 09:58:39,727 - rank=0 - INFO - __main__ - Computed total DEMs: 16777216
+2025-10-02 09:58:44,345 - rank=0 - INFO - __main__ - Finished processing input 20170906_12_01_48.npz in 27.21s
+2025-10-02 09:58:44,345 - rank=0 - INFO - __main__ - Starting processing input 20170906_12_02_12.npz
+2025-10-02 09:58:46,776 - rank=0 - INFO - __main__ - Pixels per rank (total=16777216): [4194304, 4194304, 4194304, 4194304]
+2025-10-02 09:58:49,020 - rank=0 - WARNING - src.multiGPU.gpu_kernels - [metrics] OOM: reducing batch 495450 -> 91875
+2025-10-02 09:59:06,716 - rank=0 - INFO - __main__ - Computed total DEMs: 16777216
+2025-10-02 09:59:11,364 - rank=0 - INFO - __main__ - Finished processing input 20170906_12_02_12.npz in 27.02s
+2025-10-02 09:59:11,364 - rank=0 - INFO - __main__ - Starting processing input 20170906_12_02_36.npz
+2025-10-02 09:59:13,834 - rank=0 - INFO - __main__ - Pixels per rank (total=16777216): [4194304, 4194304, 4194304, 4194304]
+2025-10-02 09:59:16,052 - rank=0 - WARNING - src.multiGPU.gpu_kernels - [metrics] OOM: reducing batch 451197 -> 131897
+2025-10-02 09:59:34,540 - rank=0 - INFO - __main__ - Computed total DEMs: 16777216
+2025-10-02 09:59:39,262 - rank=0 - INFO - __main__ - Finished processing input 20170906_12_02_36.npz in 27.90s
+2025-10-02 09:59:39,262 - rank=0 - INFO - __main__ - Starting processing input 20170906_12_03_00.npz
+2025-10-02 09:59:41,734 - rank=0 - INFO - __main__ - Pixels per rank (total=16777216): [4194304, 4194304, 4194304, 4194304]
+2025-10-02 09:59:45,340 - rank=0 - WARNING - src.multiGPU.gpu_kernels - [metrics] OOM: reducing batch 387505 -> 53204
+2025-10-02 10:00:03,296 - rank=0 - INFO - __main__ - Computed total DEMs: 16777216
+2025-10-02 10:00:08,035 - rank=0 - INFO - __main__ - Finished processing input 20170906_12_03_00.npz in 28.77s
+2025-10-02 10:00:08,035 - rank=0 - INFO - __main__ - Starting processing input 20170906_12_03_24.npz
+2025-10-02 10:00:10,533 - rank=0 - INFO - __main__ - Pixels per rank (total=16777216): [4194304, 4194304, 4194304, 4194304]
+2025-10-02 10:00:12,929 - rank=0 - WARNING - src.multiGPU.gpu_kernels - [metrics] OOM: reducing batch 488246 -> 98736
+2025-10-02 10:00:31,635 - rank=0 - INFO - __main__ - Computed total DEMs: 16777216
+2025-10-02 10:00:36,347 - rank=0 - INFO - __main__ - Finished processing input 20170906_12_03_24.npz in 28.31s
+2025-10-02 10:00:36,347 - rank=0 - INFO - __main__ - Starting processing input 20170906_12_03_48.npz
+2025-10-02 10:00:38,783 - rank=0 - INFO - __main__ - Pixels per rank (total=16777216): [4194304, 4194304, 4194304, 4194304]
+2025-10-02 10:00:40,881 - rank=0 - WARNING - src.multiGPU.gpu_kernels - [metrics] OOM: reducing batch 416435 -> 163810
+2025-10-02 10:00:59,137 - rank=0 - INFO - __main__ - Computed total DEMs: 16777216
+2025-10-02 10:01:03,880 - rank=0 - INFO - __main__ - Finished processing input 20170906_12_03_48.npz in 27.53s
+Collecting data...
+Generating '/workspace/src/multiGPU/logs/.nsys-tmp/nsys-report-18c9.qdstrm'
+Collecting data...
+Generating '/workspace/src/multiGPU/logs/.nsys-tmp/nsys-report-09f8.qdstrm'
+Collecting data...
+Generating '/workspace/src/multiGPU/logs/.nsys-tmp/nsys-report-3285.qdstrm'
+Collecting data...
+Generating '/workspace/src/multiGPU/logs/.nsys-tmp/nsys-report-4729.qdstrm'
+[1/1] [========================100%] nsys_rank1.nsys-rep
+Generated:
+	/workspace/src/multiGPU/logs/nsys/nsys_rank1.nsys-rep
+nsys-rep
+
+[1/1] [========================100%] nsys_rank0.nsys-rep
+Generated:
+	/workspace/src/multiGPU/logs/nsys/nsys_rank0.nsys-rep
+nsys-rep
+
+[1/1] [========================100%] nsys_rank2.nsys-rep
+Generated:
+	/workspace/src/multiGPU/logs/nsys/nsys_rank2.nsys-rep
+ep
+[1/1] [========================100%] nsys_rank3.nsys-rep
+Generated:
+	/workspace/src/multiGPU/logs/nsys/nsys_rank3.nsys-rep
+[OPT][87356] Completed with exit code 0
+[OPT][87356] NVTX profiling (MULTIGPU_NVTX=1); PROFILE=1

@@ -1,5 +1,6 @@
 # src/common/nvtx.py
 from __future__ import annotations
+
 """
 Tiny NVTX helper.
 
@@ -79,15 +80,20 @@ def nvtx_range(msg: str, color: Optional[int] = None) -> Iterator[None]:
     if mod is None:  # fast no-op path
         yield
         return
+    cm = None
     try:  # pragma: no cover (import + annotate simple)
         kwargs = {"message": msg}
         if color is not None:
-            # new nvtx versions: annotate(message=..., color=...)
             kwargs["color"] = int(color)
-        with mod.annotate(**kwargs):  # type: ignore[arg-type]
-            yield
-    except Exception:  # degrade silently
+        cm = mod.annotate(**kwargs)  # type: ignore[arg-type]
+    except Exception:
+        cm = None
+    if cm is None:
+        # degrade to no-op if annotate construction failed
         yield
+    else:
+        with cm:
+            yield
 
 
 def annotate_if_enabled(
