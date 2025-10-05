@@ -27,7 +27,7 @@ def make_cupy_shim():
 
     # linalg namespace
     linalg = types.SimpleNamespace()
-    
+
     def _svd(A, full_matrices=True):
         return np.linalg.svd(np.asarray(A), full_matrices=full_matrices)
 
@@ -77,7 +77,7 @@ def test_import_gpu_kernels_with_shim(monkeypatch):
     monkeypatch.setitem(importlib.sys.modules, "cupy", cp)
 
     # Reload module under test to ensure it picks up shim
-    mod = importlib.import_module("src.multiGPU.gpu_kernels")
+    mod = importlib.import_module("src.multiGPU.kernels")
     importlib.reload(mod)
 
     # basic call to dem_reg_map with small synthetic inputs
@@ -90,9 +90,7 @@ def test_import_gpu_kernels_with_shim(monkeypatch):
     data = np.array([1.0, 0.5])
     err = np.array([0.1, 0.1])
 
-    mu = mod.dem_reg_map(
-        sigmaa, sigmab, U, W, data, err, reg_tweak=1.0, nmu=10
-    )
+    mu = mod.dem_reg_map(sigmaa, sigmab, U, W, data, err, reg_tweak=1.0, nmu=10)
     assert isinstance(mu, float)
     assert mu > 0
 
@@ -114,7 +112,7 @@ def test_safe_svd_raises_on_bad_input(monkeypatch):
     bad_cp.asnumpy = lambda x: np.asarray(x)
     monkeypatch.setitem(importlib.sys.modules, "cupy", bad_cp)
 
-    mod = importlib.import_module("src.multiGPU.gpu_kernels")
+    mod = importlib.import_module("src.multiGPU.kernels")
     importlib.reload(mod)
 
     A = np.eye(3)

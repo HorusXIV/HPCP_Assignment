@@ -74,7 +74,7 @@ def _isolate_modules(monkeypatch):
 def _load_gpu_kernels_with_shim(monkeypatch):
     cp = make_cupy_shim_with_streams_off()
     monkeypatch.setitem(importlib.sys.modules, "cupy", cp)
-    mod = importlib.import_module("src.multiGPU.gpu_kernels")
+    mod = importlib.import_module("src.multiGPU.kernels")
     importlib.reload(mod)
     return mod
 

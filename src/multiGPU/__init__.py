@@ -6,7 +6,7 @@ multiple GPUs. The design favors clarity and operational robustness in HPC
 environments managed by Slurm.
 
 Modules:
-    gpu_kernels: CuPy-based kernels with CUDA stream pipelining.
+    kernels: CuPy-based kernels with CUDA stream pipelining.
     mpi_manager: Rank/GPU mapping and MPI collectives.
     main: Rank orchestrator and I/O wiring executed as ``-m`` entry.
     logging: Rank-aware logging suitable for clustered runs.
@@ -15,10 +15,10 @@ Modules:
 """
 
 __all__ = [
-        "gpu_kernels",
-        "mpi_manager",
-        "io",
-        "logging",
-        "preempt",
-        "main",
+    "kernels",
+    "mpi_manager",
+    "io",
+    "logging",
+    "preempt",
+    "main",
 ]

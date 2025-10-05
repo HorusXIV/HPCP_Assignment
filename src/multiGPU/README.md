@@ -103,3 +103,23 @@ Operational notes
 -----------------
 - GPU is required: if no CUDA device is visible, the solver raises a clear `RuntimeError`.
 - Batching is adaptive and OOM-aware; the kernel may downshift batch size automatically and will log the changes when verbose mode is enabled.
+
+Architecture notes
+------------------
+The GPU kernel implementation has been modularized for maintainability.
+
+- Public API: import directly from `src.multiGPU.kernels`:
+  - `demmap_pos`, `dem_inv_gsvd`, `dem_reg_map`, `safe_svd`, `safe_pinv`,
+    `estimate_batch_plan`, `nvtx_range`, `verbose_enabled`.
+- Modular package: `src/multiGPU/kernels/`
+  - `demmap_pos.py`: batched CuPy implementation of DEM reconstruction
+  - `dem_inv_gsvd.py`: GSVD-equivalent factorization via SVD
+  - `dem_reg_map.py`: discrepancy-principle lambda selection
+  - `linalg.py`: SVD and pseudo-inverse helpers with input sanitization
+  - `memory.py`: batch sizing and memory estimation utilities
+  - `utils.py`: NVTX ranges, verbosity flag, pinned host memory allocator
+
+Guidelines for contributors
+- Add new GPU kernels as separate modules under `src/multiGPU/kernels/`.
+- Keep device/host transfers isolated and document stream usage.
+- Prefer small, testable helpers (e.g., linalg/memory/utils) over inlining.

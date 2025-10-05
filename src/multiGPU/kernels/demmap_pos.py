@@ -1,346 +1,24 @@
 """
-GPU-accelerated kernels for DEM inversion, mirroring vendor behavior with
-OOM-aware batching on the GPU path and vendor-parity per-sample fallback.
+CuPy-accelerated batched DEM reconstruction kernel (multiGPU).
 
-This module provides:
-- A batched, CuPy-accelerated DEM reconstruction that is algorithmically
-  equivalent to the vendor baseline (SVD-of-AB1 formulation for GSVD parity).
-- Automatic, OOM-aware downscaling of batch.
+This module contains the core implementation previously housed in
+src/multiGPU/gpu_kernels.py, refactored for modularity.
 """
 
 from __future__ import annotations
 
-import os
-import math
 import logging
-from typing import Tuple, Dict, Any
+import math
+import os
 import numpy as np
-from contextlib import contextmanager
-
-
-@contextmanager
-def nvtx_range(msg: str, color: int | None = None):
-    """Lightweight NVTX context manager controlled by MULTIGPU_NVTX.
-
-    When the environment variable ``MULTIGPU_NVTX`` is set to "1", emits
-    NVTX ranges; otherwise acts as a no-op.
-    """
-    if os.environ.get("MULTIGPU_NVTX", "0") != "1":
-        yield
-        return
-    cm = None
-    try:
-        import nvtx as _nvtx  # type: ignore
-
-        kwargs = {"message": msg}
-        if color is not None:
-            kwargs["color"] = int(color)
-        cm = _nvtx.annotate(**kwargs)
-    except Exception:
-        cm = None  # degrade silently
-    if cm is None:
-        yield
-    else:
-        with cm:
-            yield
-
 
 try:
     import cupy as cp  # type: ignore
-except Exception as e:
+except Exception as e:  # pragma: no cover - import checked at runtime path
     raise ImportError("CuPy is required for multiGPU execution: %s" % e) from e
 
-
-def _bytes_per_sample_estimate(nf: int, nt: int, nmu: int) -> int:
-    """Estimate peak bytes per sample used by the batched solver (Float64).
-
-    This is an intentionally conservative estimate designed to reduce
-    OOM-induced batch resizes. It accounts for the largest simultaneously
-    live arrays in both the self-normalized L pass and the main SVD pass,
-    as well as dominant intermediates used in uncertainty and elogt paths.
-
-    Args:
-        nf: Number of filters (channels).
-        nt: Number of temperature bins.
-        nmu: Number of lambda grid points in the discrepancy search.
-
-    Returns:
-        Estimated peak bytes per sample as an integer.
-    """
-    k = min(nf, nt)
-    nmu_eff = max(int(nmu), 2)
-
-    core_terms = (
-        (nf * nt)  # A_b
-        + 2 * (nf * k + k + k * nt)  # two SVDs worth of (U, s, Vh)
-        + 2 * (k * nmu_eff)  # discrepancy vals for two passes (approx)
-        + (nt * nf)  # kdagk dominant slice used for elogt
-    )
-    io_terms = nf + nf + nt + nt + nt  # dn, ed, dem, edem, elogt
-    safety = 1.35  # cover allocator/workspace and transient temporaries
-    bytes_f64 = 8.0
-    return int(bytes_f64 * safety * (core_terms + io_terms + 64))
-
-
-def _adaptive_batch_size(na: int, nf: int, nt: int, nmu: int) -> int:
-    """Pick a batch size based on free GPU memory and problem size.
-
-    The heuristic estimates per-sample memory footprint from matrix sizes
-    and singular vector intermediates, then targets ~70% of currently free
-    device memory. Falls back to `min(64, na)` if device memory is not
-    available (e.g., running under a CPU-only shim).
-
-    Args:
-      na: Number of samples (pixels) to process.
-      nf: Number of filters (data channels).
-      nt: Number of temperature bins.
-      nmu: Number of lambda grid points used in the discrepancy search.
-
-    Returns:
-      An integer batch size in the range [1, na].
-    """
-    default = min(64, na)
-    try:
-        try:
-            cp.get_default_memory_pool().free_all_blocks()
-            cp.get_default_pinned_memory_pool().free_all_blocks()
-        except Exception:
-            pass
-        free_b, _ = cp.cuda.runtime.memGetInfo()  # type: ignore[attr-defined]
-        bytes_per = _bytes_per_sample_estimate(nf, nt, nmu)
-        if bytes_per <= 0:
-            return default
-        try:
-            frac_env = float(os.environ.get("MULTIGPU_BATCH_MEM_FRAC", "0.7"))
-            mem_frac = float(min(max(frac_env, 0.1), 0.9))
-        except Exception:
-            mem_frac = 0.55
-        est = int((free_b * mem_frac) // bytes_per)
-        return max(1, min(est, na))
-    except Exception:
-        return default
-
-
-def verbose_enabled() -> bool:
-    """Return True if verbose multiGPU logging is enabled via env.
-
-    Controlled by the environment variable ``MULTIGPU_VERBOSE``.
-    """
-    try:
-        return int(os.environ.get("MULTIGPU_VERBOSE", "0")) > 0
-    except Exception:
-        return False
-
-
-def _pinned_empty(shape, dtype):
-    """Allocate a NumPy array backed by CUDA pinned (page-locked) memory.
-
-    Uses ``cp.cuda.alloc_pinned_memory`` when available; falls back to
-    ``cp.cuda.PinnedMemory`` on some CuPy versions.
-    """
-    n_elems = int(np.prod(shape))
-    nbytes = np.dtype(dtype).itemsize * n_elems
-    mem = None
-    try:
-        mem = cp.cuda.alloc_pinned_memory(int(nbytes))
-    except Exception:
-        try:
-            mem = cp.cuda.PinnedMemory(int(nbytes))  # type: ignore[attr-defined]
-        except Exception as exc:
-            raise RuntimeError(f"Failed to allocate pinned host memory: {exc}")
-    arr = np.frombuffer(mem, dtype=dtype, count=n_elems).reshape(tuple(shape))
-    return arr
-
-
-def estimate_batch_plan(na: int, nf: int, nt: int, nmu: int) -> Dict[str, Any]:
-    """Provide a batch sizing and memory usage estimate.
-
-    This mirrors the internal heuristic and is safe to call from rank code for
-    diagnostics. If GPU memory cannot be queried, ``free_bytes`` may be ``None``.
-
-    Returns a dict with keys: ``batch_size``, ``bytes_per_sample``,
-    ``free_bytes``, ``est_batch_bytes``, ``num_batches``.
-    """
-    bps = _bytes_per_sample_estimate(nf, nt, nmu)
-    free_b = None
-    try:
-        try:
-            cp.get_default_memory_pool().free_all_blocks()
-            cp.get_default_pinned_memory_pool().free_all_blocks()
-        except Exception:
-            pass
-        free_b, _ = cp.cuda.runtime.memGetInfo()  # type: ignore[attr-defined]
-    except Exception:
-        free_b = None
-    bs = _adaptive_batch_size(na, nf, nt, nmu)
-    return {
-        "batch_size": int(bs),
-        "bytes_per_sample": int(bps),
-        "free_bytes": int(free_b) if free_b is not None else None,
-        "est_batch_bytes": int(bps * bs),
-        "num_batches": int(math.ceil(max(1, na) / max(1, bs))),
-    }
-
-
-def safe_svd(
-    A: np.ndarray, full_matrices: bool = True
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Compute a numerically safe SVD on GPU and return NumPy arrays.
-
-    Input is sanitized (NaN/Inf to finite, clipping extremes) before sending
-    to CuPy. The factorization is performed with ``cp.linalg.svd`` and the
-    results are transferred back to host as NumPy arrays.
-
-    Args:
-      A: Real-valued matrix to factorize. Will be converted to float64, C-order.
-      full_matrices: Whether to compute full-sized U and Vh (as in NumPy/CuPy).
-
-    Returns:
-      A tuple (U, s, Vh) where:
-        - U: Left singular vectors, shape (m, m) if full_matrices else (m, k).
-        - s: Singular values (non-negative), shape (k,), k = min(m, n).
-        - Vh: Right singular vectors (Hermitian transpose), shape (n, n) if
-          full_matrices else (k, n).
-
-    Raises:
-      RuntimeError: If the CuPy-backed SVD fails for any reason.
-    """
-    A = np.asarray(A, dtype=np.float64, order="C")
-    if not np.isfinite(A).all():
-        A = np.nan_to_num(A, nan=0.0, posinf=1e30, neginf=-1e30)
-    A = np.clip(A, -1e12, 1e12, out=A)
-    A_gpu = cp.asarray(A)
-    try:
-        u, s, vh = cp.linalg.svd(A_gpu, full_matrices=full_matrices)
-        return cp.asnumpy(u), cp.asnumpy(s), cp.asnumpy(vh)
-    except Exception as exc:
-        raise RuntimeError(f"CuPy SVD failed: {exc}")
-
-
-def safe_pinv(A: np.ndarray, rcond: float = 1e-12) -> np.ndarray:
-    """Compute a robust pseudo-inverse via SVD with small-value truncation.
-
-    Args:
-      A: Real-valued matrix to invert. Converted to float64.
-      rcond: Relative cutoff below which singular values are set to zero.
-
-    Returns:
-      The Moore-Penrose pseudo-inverse of ``A`` as a NumPy float64 array.
-    """
-    A = np.asarray(A, dtype=np.float64, order="C")
-    if not np.isfinite(A).all():
-        A = np.nan_to_num(A, nan=0.0, posinf=1e30, neginf=-1e30)
-    A = np.clip(A, -1e12, 1e12, out=A)
-    U, s, Vh = safe_svd(A, full_matrices=False)
-    tol = np.max(s) * rcond if s.size else rcond
-    s_inv = np.array([1.0 / x if x > tol else 0.0 for x in s], dtype=np.float64)
-    return (Vh.T * s_inv) @ U.T
-
-
-def dem_inv_gsvd(A: np.ndarray, B: np.ndarray):
-    """Compute GSVD-equivalent factors using SVD of ``A @ pinv(B)``.
-
-    This mirrors the vendor's GSVD usage but uses an SVD of the product
-    AB1 = A @ pinv(B) padded to a square matrix for stability. The outputs
-    are arranged to be drop-in compatible with the vendor function.
-
-    Args:
-      A: Data matrix of shape (m, n).
-      B: Regularization operator of shape (p, n). Only its pseudo-inverse and
-        right-multiplication behavior are used in this construction.
-
-    Returns:
-      A 5-tuple ``(alpha, beta, U_T, V_T, W)`` where:
-        - alpha: Array of shape (k,) with alpha = s / sqrt(1+s^2).
-        - beta: Array of shape (k,) with beta = 1 / sqrt(1+s^2).
-        - U_T: Transposed U (i.e., U.T) sliced to (k, m) to match vendor.
-        - V_T: Transposed V (i.e., V.T), shape (n, n).
-        - W: Transformation matrix satisfying vendor parity.
-    """
-    AB1 = A @ safe_pinv(B)
-    sze = AB1.shape
-    C = np.zeros([max(sze), max(sze)], dtype=np.float64)
-    C[: sze[0], : sze[1]] = AB1
-    u, s, v = safe_svd(C, full_matrices=True)
-    beta = 1.0 / np.sqrt(1.0 + s**2)
-    alpha = s * beta
-    SB = np.diag(beta)
-    SB_inv = safe_pinv(SB)
-    W = safe_pinv(SB_inv @ v @ B)
-    return alpha, beta, u.T[:, : sze[0]], v.T, W
-
-
-def dem_reg_map(sigmaa, sigmab, U, W, data, err, reg_tweak, nmu=500):
-    """Select the regularization parameter via the discrepancy principle.
-
-    Follows the vendor implementation by evaluating a grid of ``mu`` values
-    derived from the generalized singular values and choosing the one that
-    best satisfies Morozov's discrepancy principle.
-
-    Note: ``W`` is unused but preserved for interface parity.
-
-    Args:
-      sigmaa: 1D array of alpha-like singular values (length >= nf).
-      sigmab: 1D array of beta-like singular values (length >= nf).
-      U: Left singular vectors so rows can be addressed by filter index.
-      W: Unused (kept for vendor parity).
-      data: 1D array of data values, shape (nf,).
-      err: 1D array of errors per data point, shape (nf,).
-      reg_tweak: Scalar multiplier applied in the discrepancy.
-      nmu: Number of points in the ``mu`` geometric grid (>= 2).
-
-    Returns:
-      The selected regularization parameter ``mu`` as a float.
-
-    Raises:
-      ValueError: If U does not have at least ``nf`` rows after shape
-        normalization.
-    """
-    nf = data.shape[0]
-
-    eps = np.finfo(float).tiny
-    sigs = np.asarray(sigmaa[:nf]) / np.maximum(np.asarray(sigmab[:nf]), eps)
-    sigs = sigs[np.isfinite(sigs) & (sigs > 0)]
-    if sigs.size == 0:
-        minx, maxx = 1e-8, 1e2
-    else:
-        maxx = float(np.max(sigs))
-        minx = float((np.min(sigs) ** 2) * 1e-4)
-        minx = max(minx, 1e-300)
-        if not (maxx > minx):
-            maxx = minx * 10.0
-
-    nmu_eff = int(max(nmu, 2))
-    mu = np.geomspace(minx, maxx, num=nmu_eff, dtype=float)
-
-    # Ensure U indexing matches vendor expectations (row-major access per kk)
-    U = np.asarray(U)
-    if U.ndim != 2:
-        raise ValueError("U must be 2D")
-    if U.shape[0] < nf and U.shape[1] >= nf:
-        U = U.T  # make rows addressable by kk
-    if U.shape[0] < nf:
-        raise ValueError("U must have at least nf rows for dem_reg_map")
-
-    arg = np.zeros((nf, nmu_eff), dtype=np.float64)
-    for kk in range(nf):
-        coef = float(np.dot(data, U[kk, :]))
-        num = mu * (sigmab[kk] ** 2) * coef
-        den = (sigmaa[kk] ** 2) + mu * (sigmab[kk] ** 2)
-        arg[kk, :] = (num / den) ** 2
-    discr = np.sum(arg, axis=0) - np.sum(err**2) * float(reg_tweak)
-    opt = float(mu[int(np.argmin(np.abs(discr)))])
-    return opt
-
-
-def dem_pix(*_a, **_k):  # pragma: no cover
-    """Unsupported in the multiGPU module.
-
-    Raises:
-      RuntimeError: Always, to signal that pixel-wise DEM is not implemented
-        in this module. Use ``demmap_pos`` instead.
-    """
-    raise RuntimeError("dem_pix unsupported in multiGPU module; use demmap_pos")
+from .memory import _adaptive_batch_size, _bytes_per_sample_estimate
+from .utils import nvtx_range, verbose_enabled, _pinned_empty
 
 
 def demmap_pos(
@@ -359,49 +37,60 @@ def demmap_pos(
     l_emd=False,
     rscl=False,
 ):
-    """Reconstruct Differential Emission Measure (DEM) for many samples.
+    """Reconstruct Differential Emission Measure (DEM) for many samples on GPU.
 
-    This function mirrors the vendor baseline (GSVD parity via an
-    SVD-of-AB1 construction) while accelerating batched cases on GPU.
-    It includes a self-normalized L pass when ``dem_norm0`` is trivial,
-    optional GLOCI-based weighting, Morozov discrepancy selection for the
-    regularization parameter, a positivity loop, and vendor-aligned
-    computations for ``edem`` and ``elogt``.
-
-        GPU requirements and error behavior:
-        - If no CUDA device is available (``cp.cuda.runtime.getDeviceCount() == 0``),
-            this function raises ``RuntimeError``. This module is GPU-only by design.
-        - If GPU memory is insufficient for the current batch, the batch size is
-            automatically reduced and retried. If retries are exhausted, a
-            ``RuntimeError`` is raised with guidance to reduce the batch size.
+    Batched CuPy implementation that adaptively chooses batch size from
+    available device memory, performs two-pass SVD-based inversion with
+    vendor-compatible behavior, and asynchronously transfers results back
+    to pinned host memory.
 
     Args:
-      dd: Data array of shape (na, nf) with measured intensities.
-      ed: Error array of shape (na, nf) with per-channel uncertainties.
-      rmatrix: Response matrix of shape (nt, nf).
-      logt: Log-temperature grid of shape (nt,).
-      dlogt: Log-temperature bin widths of shape (nt,).
-      glc: GLOCI selector array (shape (nf,)) with positive entries selecting
-        channels for the GLOCI prior. If none positive, self-normalized L is
-        used when ``dem_norm0`` is trivial.
-      reg_tweak: Discrepancy multiplier (>= 0). Default 1.0.
-      max_iter: Max positivity loop iterations. Default 10.
-      rgt_fact: Factor to increase ``reg_tweak`` when negativity is detected.
-      dem_norm0: Optional prior weights. If None or trivial, a self-normalized
-        pass is performed to construct L. Shape (na, nt) or (nt,).
-      nmu: Number of mu grid points in the discrepancy search (>= 2).
-      warn: If True, prints a warning when positivity loop hits ``max_iter``.
-      l_emd: If True, use absolute weights for L (vendor option for EMD).
-      rscl: If True, rescales DEM and EDEM by the mean data/prediction ratio
-        (vendor ``rscl`` behavior).
+        dd (array-like): Data matrix of shape (na, nf); counts per filter.
+        ed (array-like): 1-sigma errors of shape (na, nf) or (1, nf).
+        rmatrix (array-like): Response matrix of shape (nt, nf).
+        logt (array-like): Temperature grid centers of shape (nt,).
+        dlogt (array-like): Bin widths in log(T) of shape (nt,).
+        glc (array-like): Global constraints mask per filter (nf,) where
+            positive entries enable L0-style pass; if all non-positive,
+            an internal L0 pass seeds the main SVD iteration.
+        reg_tweak (float, optional): Discrepancy principle multiplier for
+            target residual. Defaults to 1.0.
+        max_iter (int, optional): Max iterations of non-negativity relaxation
+            during lambda selection. Defaults to 10.
+        rgt_fact (float, optional): Multiplicative factor to increase
+            regularization when negative DEM entries are detected. Defaults to 1.5.
+        dem_norm0 (array-like | None, optional): Initial DEM normalization
+            of shape (na, nt) or broadcastable (nt,). Currently used for
+            parity with vendor; can be None. Defaults to None.
+        nmu (int, optional): Number of candidate regularization parameters
+            sampled on a log grid per batch element. Defaults to 42.
+        warn (bool, optional): Unused placeholder for vendor parity.
+        l_emd (bool, optional): If True, use L1-like weighting; otherwise
+            use sqrt(weight)/sqrt(dlogt) per vendor behavior. Defaults False.
+        rscl (bool, optional): If True, rescale DEM to match mean ratio of
+            observed/predicted data. Defaults False.
 
     Returns:
-      A 5-tuple (dem, edem, elogt, chisq, dn_reg) where:
-        - dem: DEM map, shape (na, nt).
-        - edem: DEM uncertainties, shape (na, nt).
-        - elogt: Temperature width proxy, shape (na, nt).
-        - chisq: Reduced chi-square per sample, shape (na,).
-        - dn_reg: Predicted data, shape (na, nf).
+        tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+            - dem: (na, nt) reconstructed DEM
+            - edem: (na, nt) error estimates per temperature bin
+            - elogt: (na, nt) effective log(T) half-width per bin
+            - chisq: (na,) reduced chi-square per sample
+            - dn_reg: (na, nf) predicted data under the chosen regularization
+
+    Raises:
+        ImportError: If CuPy is not installed/available at runtime.
+        RuntimeError: If no CUDA device is visible or if GPU OOM persists
+            after downshifting batch size.
+
+    Environment:
+        - MULTIGPU_BATCH_SIZE: Force a fixed batch size when > 0; otherwise
+          an adaptive size is computed.
+        - MULTIGPU_BATCH_MEM_FRAC: Fraction of free GPU memory targeted by
+          the adaptive planner (default 0.7, clamped to [0.1, 0.9]).
+        - MULTIGPU_VERBOSE: When set, logs plan/OOM retries as [metrics].
+        - MULTIGPU_NVTX: When "1", enables NVTX ranges (requires nvtx pkg).
+        - MULTIGPU_*POOL_LIMIT_*: Optional CuPy pool soft-limits.
     """
     # Convert inputs
     dd = np.asarray(dd, dtype=np.float64)
@@ -491,7 +180,9 @@ def demmap_pos(
                     except Exception:
                         pass
                 try:
-                    pin_limit_env = os.environ.get("MULTIGPU_PINNED_POOL_LIMIT_BYTES", None)
+                    pin_limit_env = os.environ.get(
+                        "MULTIGPU_PINNED_POOL_LIMIT_BYTES", None
+                    )
                     if pin_limit_env is not None:
                         pin_pool.set_limit(int(pin_limit_env))
                     else:
@@ -579,7 +270,9 @@ def demmap_pos(
                         free_b3, _ = cp.cuda.runtime.memGetInfo()  # type: ignore[attr-defined]
                         bps3 = _bytes_per_sample_estimate(nf, nt, nmu)
                         try:
-                            frac_env = float(os.environ.get("MULTIGPU_BATCH_MEM_FRAC", "0.7"))
+                            frac_env = float(
+                                os.environ.get("MULTIGPU_BATCH_MEM_FRAC", "0.7")
+                            )
                             mem_frac = float(min(max(frac_env, 0.1), 0.9))
                         except Exception:
                             mem_frac = 0.55
@@ -605,19 +298,7 @@ def demmap_pos(
         tlin = cp.linspace(0.0, 1.0, nmu_eff, dtype=cp.float64)
 
         def _smooth_and_clamp(wraw_b: "cp.ndarray") -> "cp.ndarray":
-            """Apply vendor-equivalent smoothing and clamping to weights.
-
-            Performs a centered 5-point moving average on the interior of
-            wraw (dropping the first/last element) and normalizes by the
-            per-sample maximum, then clamps to a minimum of 1e-8.
-
-            Args:
-              wraw_b: Raw weights, shape (batch, nt).
-
-            Returns:
-              Smoothed and clamped weights of shape (batch, nt-2-2) which
-              matches the vendor's centered-window handling.
-            """
+            """Apply vendor-equivalent smoothing and clamping to weights."""
             x = wraw_b[:, 1:-1]
             z = cp.pad(x, ((0, 0), (4, 4)))
             cs = cp.cumsum(z, axis=1)
@@ -693,12 +374,28 @@ def demmap_pos(
                         with compute_stream:
                             dn_b = dn_dev[slot][:cur, :]
                             ed_b = ed_dev[slot][:cur, :]
+                            # Preserve original errors for residuals; clamp a normalized copy for stability
+                            ed_b_orig = ed_b
+                            ed_b = cp.maximum(ed_b, cp.array(1e-12, dtype=cp.float64))
 
                             rmatrixin_b = (
                                 rmatrix_d[None, :, :] * (1.0 / ed_b)[:, None, :]
                             )
                             A_b = cp.transpose(rmatrixin_b, (0, 2, 1))
                             dprime_b = dn_b / ed_b
+
+                            # Guard invalid rows (NaN/Inf or non-positive product after normalization)
+                            valid_rows = cp.logical_and(
+                                cp.all(cp.isfinite(dprime_b), axis=1),
+                                cp.prod(dprime_b, axis=1) > 0.0,
+                            )
+                            # Zero-out invalid rows in inputs to keep SVD stable; they'll be set to zeros in outputs later
+                            inv_mask = ~valid_rows
+                            if bool(cp.any(inv_mask)):
+                                A_b = A_b.copy()
+                                dprime_b = dprime_b.copy()
+                                A_b[inv_mask, :, :] = 0.0
+                                dprime_b[inv_mask, :] = 0.0
 
                     use_gloci = bool(np.sum(glc > 0) > 0)
                     if use_gloci:
@@ -736,8 +433,11 @@ def demmap_pos(
                                     mu0[:, None, :] / (s2[:, :, None] + mu0[:, None, :])
                                 ) * coef0[:, :, None]
                                 arg_sum0 = cp.sum(vals0**2, axis=1)
-                                err_sq = cp.sum(ed_b**2, axis=1)
-                                discr0 = arg_sum0 - (err_sq * float(reg_tweak))[:, None]
+                                # Vendor parity: after normalization by ed, discrepancy target uses sum(err^2)=nf
+                                err_sq0 = cp.full((cur,), float(nf), dtype=cp.float64)
+                                discr0 = (
+                                    arg_sum0 - (err_sq0 * float(reg_tweak))[:, None]
+                                )
                                 idx0 = cp.argmin(cp.abs(discr0), axis=1)
                                 lamb0 = mu0[cp.arange(cur), idx0]
                                 V0 = cp.transpose(Vh0, (0, 2, 1))
@@ -780,7 +480,8 @@ def demmap_pos(
                             coef = cp.matmul(
                                 cp.transpose(U, (0, 2, 1)), dprime_b[:, :, None]
                             ).squeeze(-1)
-                            err_sq = cp.sum(ed_b**2, axis=1)
+                            # Vendor parity: normalized system -> sum(err^2)=nf
+                            err_sq = cp.full((cur,), float(nf), dtype=cp.float64)
 
                     next_b0 = b1
                     if next_b0 < na:
@@ -810,7 +511,8 @@ def demmap_pos(
                                 ).squeeze(-1)
                                 dem_out = bvec * xprime
                                 dn_pred = cp.matmul(dem_out, rmatrix_d)
-                                resid = (dn_b - dn_pred) / ed_b
+                                # Use original (unclamped) errors for residuals to match vendor behavior
+                                resid = (dn_b - dn_pred) / ed_b_orig
                                 chisq_b = cp.sum(resid**2, axis=1) / nf
                                 neg_mask = cp.any(dem_out < 0, axis=1)
                                 if not bool(cp.any(neg_mask)):
@@ -853,8 +555,23 @@ def demmap_pos(
                                 dem_out = dem_out * mnrat[:, None]
                                 edem_b = edem_b * mnrat[:, None]
                                 dn_pred = cp.matmul(dem_out, rmatrix_d)
-                                resid = (dn_b - dn_pred) / ed_b
+                                resid = (dn_b - dn_pred) / ed_b_orig
                                 chisq_b = cp.sum(resid**2, axis=1) / nf
+
+                    # Zero outputs for invalid rows (match vendor skip of bad pixels)
+                    with nvtx_range("INVALID_ROW_ZERO", color=0x9E9E9E):
+                        if "valid_rows" in locals() and bool(cp.any(~valid_rows)):
+                            vr = valid_rows
+                            dem_out = dem_out.copy()
+                            edem_b = edem_b.copy()
+                            elogt_b = elogt_b.copy()
+                            dn_pred = dn_pred.copy()
+                            chisq_b = chisq_b.copy()
+                            dem_out[~vr, :] = 0.0
+                            edem_b[~vr, :] = 0.0
+                            elogt_b[~vr, :] = dlogt_d[None, :]
+                            dn_pred[~vr, :] = 0.0
+                            chisq_b[~vr] = 0.0
                     with nvtx_range("DEVICE_TO_HOST_ASYNC", color=0x795548):
                         slot_id = (b0 // max(1, cur_batch)) % RING
                         _sync_and_clear_slot(slot_id)
@@ -943,7 +660,9 @@ def demmap_pos(
                         bps2 = _bytes_per_sample_estimate(nf, nt, nmu)
                         # Use the same configurable fraction for consistency
                         try:
-                            frac_env = float(os.environ.get("MULTIGPU_BATCH_MEM_FRAC", "0.7"))
+                            frac_env = float(
+                                os.environ.get("MULTIGPU_BATCH_MEM_FRAC", "0.7")
+                            )
                             mem_frac = float(min(max(frac_env, 0.1), 0.9))
                         except Exception:
                             mem_frac = 0.55
@@ -981,3 +700,6 @@ def demmap_pos(
         raise RuntimeError(
             "GPU OOM: exhausted retries; try reducing MULTIGPU_BATCH_SIZE or input size"
         )
+
+
+__all__ = ["demmap_pos"]

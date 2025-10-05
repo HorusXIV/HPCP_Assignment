@@ -21,15 +21,15 @@ import time
 from src.common.nvtx import nvtx_range
 from . import io as mio
 from . import mpi_manager as mmpi
-from . import gpu_kernels
+from . import kernels
 from . import logging as mlog
 
 
 def parse_args():
     """Parse CLI arguments for the multi-GPU entry point.
 
-        Returns:
-            Parsed CLI options.
+    Returns:
+        Parsed CLI options.
     """
     p = argparse.ArgumentParser()
     p.add_argument(
@@ -259,7 +259,7 @@ def main():
                     nf_rank = int(nf)
                     nt_rank = int(nt)
                     nmu_rank = 42
-                    plan = gpu_kernels.estimate_batch_plan(
+                    plan = kernels.estimate_batch_plan(
                         na_rank, nf_rank, nt_rank, nmu_rank
                     )
                     bytes_per_img = int(plan.get("bytes_per_sample", 0) * nt_rank)
@@ -288,7 +288,7 @@ def main():
                         elogt_local,
                         chisq_local,
                         dn_reg_local,
-                    ) = gpu_kernels.demmap_pos(
+                    ) = kernels.demmap_pos(
                         local_dn,
                         local_edn,
                         tresp,
