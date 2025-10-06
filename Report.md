@@ -32,10 +32,15 @@ HPC Assignment — Accelerating DEMREG
     - [Future Work](#future-work)
 
 # Introduction
-Lorem ipsum dolor sit amet, consectetur adipiscing elit. Vivamus lacinia odio vitae vestibulum vestibulum. Cras venenatis euismod malesuada.
+This project is based on the [DEMREG codebase](https://github.com/ianan/demreg),  
+a scientific application written in Python with heavy use of NumPy. The goal of the project is to utilize various solutions to improve runtime of the Demreg codebase.
+Our approach is to initially benchmark the baseline implementation and then work on 3 approaches to speed up the runtime, the 3 implementations include:
+- single GPU Numba/CuPy implementation
+- single GPU Dask implementation
+- multi GPU implementation utilizing CUDA/CuPy
 
-- # Methodology
-Lorem ipsum dolor sit amet, consectetur adipiscing elit. Vivamus lacinia odio vitae vestibulum vestibulum. Cras venenatis euismod malesuada.
+# Methodology
+For our Methodology we initially aim to benchmark the baseline code and improve the methods and calculations to utilize GPU Computational Power and Memory Throughput using the 3 previously mentioned implementations.
 
 # Benchmarking
 Lorem ipsum dolor sit amet, consectetur adipiscing elit. Vivamus lacinia odio vitae vestibulum vestibulum. Cras venenatis euismod malesuada.
@@ -44,8 +49,59 @@ Lorem ipsum dolor sit amet, consectetur adipiscing elit. Vivamus lacinia odio vi
 ## Accelerating with Dask
 Lorem ipsum dolor sit amet, consectetur adipiscing elit. Vivamus lacinia odio vitae vestibulum vestibulum. Cras venenatis euismod malesuada.
 
-## Accelerating with Numba
-Lorem ipsum dolor sit amet, consectetur adipiscing elit. Vivamus lacinia odio vitae vestibulum vestibulum. Cras venenatis euismod malesuada.
+## Accelerating with Numba and CuPy
+
+### Initial Improvement of Baseline
+
+I started from the baseline NumPy implementation, adding Numba decorators (`@jit`, `@cuda.jit`) to accelerate the most computationally expensive loops. The goal was to reduce Python’s interpreter overhead and offload basic operations to the GPU.  
+
+However, after testing this initial setup, performance improvements were negligible, the processing time measured in at about 2h.  
+
+The main reasons for this limited performance were:
+
+- Serial execution across tiles rather than true parallelization  
+- Low GPU utilization (typically <10%) due to small kernels and excessive synchronization  
+- Frequent GPU to CPU memory transfers, negating any acceleration benefits  
+
+In short, while Numba did accelerate the inner loops, the surrounding data movement and control flow dominated runtime.
+
+### Transition to CuPy
+
+To overcome the I/O bottlenecks, the implementation was refactored to use CuPy for memory management and array operations while still using Numba for the inner computational kernels.  
+
+This hybrid approach, however, led to context conflicts between Numba and CuPy’s separate CUDA drivers, producing errors such as:
+
+```
+CUDA_ERROR_INVALID_CONTEXT
+```
+
+and frequent GPU crashes after multiple frames.  
+Even when it ran, the computation time was still around 40 minutes per image, an improvement but far from optimal.
+
+To fix this, all Numba kernels were removed and replaced with a pure CuPy implementation.  
+The solver logic including DEM, EDEM, and Chi-squared was fully vectorized and executed using CuPy’s own GPU primitives (built on CUBLAS and CUB).  
+
+This transition simplified memory management, removed kernel launch overheads, and enabled asynchronous CUDA stream–based parallel tile processing.  
+After these changes, the runtime dropped dramatically to ~4.5 minutes per image on a single NVIDIA RTX A4500 GPU.
+
+
+### Profiling and Observations
+
+After implementing the CuPy-only path, profiling revealed:
+
+- Good memory throughput, with most GPU memory being effectively used depending on the chosen tile size  
+- Moderate GPU compute utilization (typically 30–50%), suggesting that while memory and I/O are efficient, the computation itself may not be fully saturating the GPU’s cores  
+- Each frame is now processed independently, with GPU memory being freed after each image to avoid out-of-memory (OOM) issues  
+
+The remaining performance bottleneck appears to be in the solver’s numerical complexity, which is already heavily optimized and not trivially parallelizable further.
+
+
+### Conclusion
+
+Using Numba for single-GPU acceleration of NumPy-heavy scientific code provides limited benefits, especially when data transfer and context management dominate runtime.  
+
+By contrast, refactoring the implementation to use CuPy exclusively for both computation and memory management provided an order-of-magnitude speedup, reducing runtime from over 2 hours to about 4.5 minutes per image.  
+
 
 ## multiGPU Setup
 
@@ -201,9 +257,26 @@ The measurements show that the new memory‑handling logic has a lower average w
 
 Lorem ipsum dolor sit amet, consectetur adipiscing elit. Vivamus lacinia odio vitae vestibulum vestibulum. Cras venenatis euismod malesuada.
 
-## Numba
+## Numba/CuPy
 
-Lorem ipsum dolor sit amet, consectetur adipiscing elit. Vivamus lacinia odio vitae vestibulum vestibulum. Cras venenatis euismod malesuada.
+With the final CuPy-based implementation, the average compute time per image stabilized around 4.5 minutes (compared to the 2+ hours of the baseline)(**ADJUST IF NECESSARY**). GPU utilization reported by `nvidia-smi` typically ranged between 30–50%, which suggests that while memory throughput was good, the computation itself remained somewhat underutilized. This behavior is likely due to the per-tile vectorization strategy, tiles are processed in parallel on the GPU, synchronization points and host–device data transfers still introduce idle periods.
+
+While the CuPy rewrite significantly improved runtime, it came with trade-offs in memory stability and transparency. Managing GPU memory explicitly (via CuPy’s memory pools) was crucial to prevent OOM errors on large frames. The use of CuPy over Numba proved beneficial: CuPy’s kernels leverage NVIDIA’s optimized CUDA libraries (CUBLAS, CUB), whereas Numba’s JIT-generated kernels, while flexible, introduced context instability when mixed with CuPy operations.
+
+### Lessons Learned
+
+1. Numba + CuPy interaction is fragile.  
+   Mixing them can lead to invalid CUDA contexts, especially when both allocate memory on the same device. A single-GPU pipeline should use one GPU backend consistently.
+2. CuPy excels at vectorized math, not orchestration.
+   It’s ideal for replacing NumPy compute kernels but less efficient for managing complex GPU task pipelines (where PyTorch, Triton, or custom CUDA might be preferable).
+3. Memory control is essential. 
+   Freeing GPU memory after each frame (`cp.get_default_memory_pool().free_all_blocks()`) kept long runs stable and avoided OOM kills.
+
+### Future Work
+
+* Asynchronous tiling and batching: Implement true tile-level parallelism using CUDA streams or CuPy’s asynchronous APIs to improve kernel overlap.
+* Adaptive tile sizing: Dynamically adjust tile size based on available GPU memory to balance throughput and stability.
+
 
 ## multiGPU
 
