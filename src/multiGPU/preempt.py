@@ -18,7 +18,11 @@ except Exception:
 
 
 def _call_callback(cb: Callable[[], None], timeout: float = 30.0):
-    """Invoke ``cb`` and suppress exceptions to avoid aborting the handler."""
+    """Invoke ``cb`` and suppress exceptions to avoid aborting the handler.
+
+    The callback typically persists partial results or writes a marker file so
+    schedulers can resume work later. Errors are printed and ignored.
+    """
     try:
         cb()
     except Exception:
@@ -37,11 +41,11 @@ def register_preempt_handlers(
     """Register handlers for preemption/termination signals.
 
     Args:
-      callback: Zero-arg function invoked within the handler thread.
-      comm: Optional MPI communicator used to attempt a barrier after the
-        callback returns.
-      signals: Optional list of ``signal.SIG*``; defaults to SIGTERM/SIGINT
-        and SIGUSR1 when available.
+        callback: Zero-arg function invoked within the handler thread.
+        comm: Optional MPI communicator used to attempt a barrier after the
+            callback returns.
+        signals: Optional list of ``signal.SIG*``; defaults to SIGTERM/SIGINT
+            and SIGUSR1 when available.
     """
     if signals is None:
         # common scheduler signals: SIGTERM, SIGINT;
@@ -51,9 +55,7 @@ def register_preempt_handlers(
 
     def _handler(signum, frame):
         name = (
-            signal.Signals(signum).name
-            if hasattr(signal, "Signals")
-            else str(signum)
+            signal.Signals(signum).name if hasattr(signal, "Signals") else str(signum)
         )
         print(
             (

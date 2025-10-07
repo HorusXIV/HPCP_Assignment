@@ -29,7 +29,7 @@ def parse_args():
     """Parse CLI arguments for the multi-GPU entry point.
 
     Returns:
-        Parsed CLI options.
+        argparse.Namespace: Parsed CLI options.
     """
     p = argparse.ArgumentParser()
     p.add_argument(
@@ -81,6 +81,7 @@ def main():
     except Exception:
         pass
 
+    # Map ranks to GPUs and validate the runtime environment
     with nvtx_range("RANK_GPU_BIND", color=0x009688):
         local_rank, local_size, node = mmpi.get_local_rank_info(comm)
         gpu_assigned = mmpi.set_device_for_local_rank(comm)
@@ -243,16 +244,14 @@ def main():
                     except Exception:
                         pass
 
-                # Build simple response matrix (nt x nf)
-                nf = local_dn.shape[1]
-                nt = 10
-                logt = np.linspace(5.0, 7.0, nt)
-                dlogt = np.full(nt, logt[1] - logt[0])
-                tresp = np.ones((nt, nf))
-
+                # Route computation through the multiGPU dn2dem_pos wrapper.
+                # The wrapper will construct responses once internally for consistency.
+                nf = int(local_dn.shape[1])
+                nt = 10  # kept for logging/metrics parity only
                 try:
                     verbose = mlog.verbose_enabled()
                 except Exception:
+                    log.error("Failed to query verbose logging state")
                     verbose = False
                 if verbose:
                     na_rank = int(local_dn.shape[0])
@@ -281,6 +280,8 @@ def main():
                 if gpu_assigned is None or gpu_assigned < 0:
                     raise RuntimeError("No GPU assigned for multiGPU execution")
 
+                from .dn2dem_pos import dn2dem_pos as _mg_dn2dem_pos
+
                 with nvtx_range("GPU_COMPUTE", color=0xE65100):
                     (
                         dem_local,
@@ -288,13 +289,13 @@ def main():
                         elogt_local,
                         chisq_local,
                         dn_reg_local,
-                    ) = kernels.demmap_pos(
+                    ) = _mg_dn2dem_pos(
                         local_dn,
                         local_edn,
-                        tresp,
-                        logt,
-                        dlogt,
-                        np.ones((nf,), dtype=float),
+                        # Responses built internally for synthetic runs
+                        tresp=None,
+                        tresp_logt=None,
+                        temps=None,
                     )
 
                 if comm is not None:
@@ -311,6 +312,19 @@ def main():
                     dem_all = dem_local
 
                 if rank == 0 and dem_all is not None:
+                    try:
+                        dmin = float(np.min(dem_all))
+                        dmax = float(np.max(dem_all))
+                        dmean = float(np.mean(dem_all))
+                        log.info(
+                            "DEM summary: count=%d min=%.3e max=%.3e mean=%.3e",
+                            dem_all.shape[0],
+                            dmin,
+                            dmax,
+                            dmean,
+                        )
+                    except Exception:
+                        pass
                     log.info(
                         f"Computed total DEMs: {dem_all.shape[0]}",
                         extra={"general": True},

@@ -15,7 +15,9 @@ def dem_inv_gsvd(A: np.ndarray, B: np.ndarray):
     """Compute GSVD-equivalent factors using SVD of ``A @ pinv(B)``.
 
     This mirrors the vendor pipeline to produce equivalent outputs to a
-    GSVD, but implemented with a standard SVD on the product A @ pinv(B).
+    GSVD, but implemented with a standard SVD on the product ``A @ pinv(B)``.
+    Conceptually, this balances two quadratic forms (data-fit and smoothness)
+    without relying on a dedicated GSVD implementation.
 
     Args:
         A (np.ndarray): Left matrix in the generalized system.

@@ -34,7 +34,13 @@ def _require_cupy() -> None:
 def init_mpi():
     """Initialize MPI and return a triple ``(comm, rank, size)``.
 
-    Returns a serial-compatible stub when ``mpi4py`` is unavailable.
+    Returns:
+        Tuple[Optional[object], int, int]: ``(comm, rank, size)`` where
+        ``comm`` is an ``mpi4py`` communicator or ``None`` in serial mode.
+
+    Notes:
+        When ``mpi4py`` is unavailable, a serial-compatible stub is returned
+        so the rest of the pipeline can operate without MPI.
     """
     if MPI is None:
         return None, 0, 1
@@ -87,7 +93,7 @@ def scatterv_array(comm, array, counts, dtype=None):
         dtype: Data type for non-root allocation if ``array`` is ``None``.
 
     Returns:
-        Local 2D slice on each rank.
+        np.ndarray: Local 2D slice on each rank.
     """
     import numpy as _np
 
@@ -138,6 +144,7 @@ def scatterv_array(comm, array, counts, dtype=None):
         @_cm
         def nvtx_range(_m):  # type: ignore
             yield
+
     with nvtx_range("MPI.Scatterv"):
         comm.Scatterv(
             [sendbuf_bytes, sendcounts_bytes, displs_bytes, MPI.BYTE],
@@ -158,29 +165,74 @@ def gatherv_array(comm, local_array, counts, root=0):
         root: Root rank that receives the full array.
 
     Returns:
-        Full array on ``root``; ``None`` on other ranks.
+        Optional[np.ndarray]: Full array on ``root``; ``None`` on other ranks.
     """
     import numpy as _np
 
     rank = comm.Get_rank() if comm is not None else 0
-    cols = local_array.shape[1]
+    size = comm.Get_size() if comm is not None else 1
+    cols = int(local_array.shape[1])
 
-    sendbuf = local_array.ravel()
-    itemsize = int(_np.dtype(local_array.dtype).itemsize)
+    # Validate counts shape
+    if len(counts) != size:
+        raise ValueError(f"counts length {len(counts)} does not match comm size {size}")
 
-    sendcounts_bytes = [int(c * cols * itemsize) for c in counts]
-    displs_bytes = []
-    for i in range(len(sendcounts_bytes)):
-        displs_bytes.append(int(sum(sendcounts_bytes[:i])))
+    # Ensure C-contiguous buffers
+    sendbuf2d = _np.ascontiguousarray(local_array)
+    # Element counts (not bytes): rows*cols per rank
+    recvcounts_elems = [int(c * cols) for c in counts]
+    displs_elems = [0] * size
+    for i in range(1, size):
+        displs_elems[i] = displs_elems[i - 1] + recvcounts_elems[i - 1]
 
+    # Map numpy dtype to MPI datatype
+    try:
+        from mpi4py import MPI as _MPI
+
+        mpitype = _MPI._typedict.get(_np.dtype(sendbuf2d.dtype).char)  # type: ignore[attr-defined]
+        if mpitype is None:
+            # Fallback: treat as contiguous bytes with explicit cast
+            sendbuf_flat = sendbuf2d.ravel().view(_np.uint8)
+            if rank == root:
+                total_rows = int(sum(counts))
+                recvbuf = _np.empty(total_rows * cols, dtype=sendbuf2d.dtype)
+                recvbuf_flat = recvbuf.view(_np.uint8)
+            else:
+                recvbuf = None
+                recvbuf_flat = None
+            itemsize = int(_np.dtype(sendbuf2d.dtype).itemsize)
+            recvcounts_bytes = [int(x * itemsize) for x in recvcounts_elems]
+            displs_bytes = [int(x * itemsize) for x in displs_elems]
+            try:
+                from src.common.nvtx import nvtx_range  # lazy import
+            except Exception:
+                from contextlib import contextmanager as _cm
+
+                @_cm
+                def nvtx_range(_m):  # type: ignore
+                    yield
+
+            with nvtx_range("MPI.Gatherv"):
+                comm.Gatherv(
+                    sendbuf_flat,
+                    [recvbuf_flat, recvcounts_bytes, displs_bytes, _MPI.BYTE],
+                    root=root,
+                )
+            if rank == root:
+                return recvbuf.reshape(sum(counts), cols)
+            return None
+    except Exception as _:
+        mpitype = None
+
+    # Preferred path: use element counts with matching MPI type
+    sendbuf_flat = sendbuf2d.ravel()
     if rank == root:
         total_rows = int(sum(counts))
-        recvbuf = _np.empty(total_rows * cols, dtype=local_array.dtype)
+        recvbuf = _np.empty((total_rows, cols), dtype=sendbuf2d.dtype)
+        recv_flat = recvbuf.ravel()
     else:
         recvbuf = None
-
-    sendbuf_bytes = sendbuf.view(_np.uint8)
-    recvbuf_bytes = recvbuf.view(_np.uint8) if recvbuf is not None else None
+        recv_flat = None
 
     try:
         from src.common.nvtx import nvtx_range  # lazy import
@@ -190,15 +242,33 @@ def gatherv_array(comm, local_array, counts, root=0):
         @_cm
         def nvtx_range(_m):  # type: ignore
             yield
+
+    try:
+        from src.common.nvtx import nvtx_range  # lazy import
+    except Exception:
+        from contextlib import contextmanager as _cm
+
+        @_cm
+        def nvtx_range(_m):  # type: ignore
+            yield
+
     with nvtx_range("MPI.Gatherv"):
-        comm.Gatherv(
-            sendbuf_bytes,
-            [recvbuf_bytes, sendcounts_bytes, displs_bytes, MPI.BYTE],
-            root=root,
-        )
+        if mpitype is None:
+            # Should not happen due to fallback above, but keep safe path
+            comm.Gatherv(
+                sendbuf_flat,
+                [recv_flat, recvcounts_elems, displs_elems, MPI.BYTE],
+                root=root,
+            )
+        else:
+            comm.Gatherv(
+                [sendbuf_flat, mpitype],
+                [recv_flat, recvcounts_elems, displs_elems, mpitype],
+                root=root,
+            )
 
     if rank == root:
-        return recvbuf.reshape(sum(counts), cols)
+        return recvbuf
     return None
 
 
@@ -206,13 +276,17 @@ def set_device_for_local_rank(comm, prefer_visible=True):
     """Bind the process to a GPU index based on node-local rank.
 
     Strategy:
-    1) Respect ``CUDA_VISIBLE_DEVICES`` if present.
-    2) Otherwise query CuPy for device count; fall back to ``N_GPUS``.
-    3) Set ``CUDA_VISIBLE_DEVICES`` and perform a tiny runtime allocation
-       to validate the device; return ``-1`` on failure.
+        1) Respect ``CUDA_VISIBLE_DEVICES`` if present.
+        2) Otherwise query CuPy for device count; fall back to ``N_GPUS``.
+        3) Set ``CUDA_VISIBLE_DEVICES`` and perform a tiny runtime allocation
+           to validate the device; return ``-1`` on failure.
+
+    Args:
+        comm: MPI communicator or ``None`` for serial mode.
+        prefer_visible (bool): Unused compatibility flag; reserved.
 
     Returns:
-        The chosen local device index or ``-1`` when no device is usable.
+        int: The chosen local device index or ``-1`` when no device is usable.
     """
     if comm is None:
         local_rank = 0
@@ -326,5 +400,6 @@ def barrier(comm):
         @_cm
         def nvtx_range(_m):  # type: ignore
             yield
+
     with nvtx_range("MPI.Barrier"):
         comm.Barrier()

@@ -1,7 +1,8 @@
 """I/O helpers for the multi-GPU DEM solver.
 
-Minimal utilities to load ``.npz`` inputs and coerce shapes to match the
-GPU kernels' expectations.
+This module provides small utilities to load ``.npz`` inputs and coerce array
+shapes to match the GPU kernels' expectations, keeping orchestration code in
+``main.py`` concise.
 """
 
 import numpy as np
@@ -28,10 +29,11 @@ def ensure_2d_dn(dn: np.ndarray) -> np.ndarray:
     the sample axis.
 
     Args:
-      dn: Input array of band measurements.
+        dn: Input array of band measurements.
 
     Returns:
-      Two-dimensional array with samples along axis 0 and filters along axis 1.
+        Two-dimensional array with samples along axis 0 and filters along
+        axis 1.
     """
     dn = np.asarray(dn)
     if dn.ndim == 1:

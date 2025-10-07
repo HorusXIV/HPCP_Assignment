@@ -14,29 +14,49 @@ from typing import Dict, Any
 
 
 def _bytes_per_sample_estimate(nf: int, nt: int, nmu: int) -> int:
-    """Estimate peak bytes per sample used by the batched solver (Float64).
+    """Estimate peak bytes/sample (float64) for the batched DEM solver.
 
-    Args:
-        nf (int): Number of filters.
-        nt (int): Number of temperature bins.
-        nmu (int): Number of candidate regularization values.
+    This accounts for:
+    - Two SVD passes (initial L0 and main pass, worst-case when gloci=0)
+    - Lambda selection buffers (mu grid, vals, coef, discr)
+    - Downstream matrices for error/elogt (kVT, kdag, kdagk)
+    - Primary per-sample tensors (normalized A_b/AB1 and intermediates)
 
-    Returns:
-        int: Estimated peak bytes per sample.
+    The estimate intentionally errs on the conservative side to avoid OOM
+    retries that drastically reduce batch size.
     """
-    k = min(nf, nt)
+    k = min(int(nf), int(nt))
     nmu_eff = max(int(nmu), 2)
 
-    core_terms = (
-        (nf * nt)  # A_b
-        + 2 * (nf * k + k + k * nt)  # two SVDs worth of (U, s, Vh)
-        + 2 * (k * nmu_eff)  # discrepancy vals for two passes (approx)
-        + (nt * nf)  # kdagk dominant slice used for elogt
-    )
-    io_terms = nf + nf + nt + nt + nt  # dn, ed, dem, edem, elogt
-    safety = 1.35  # cover allocator/workspace and transient temporaries
+    # Core per-sample floats (worst-case two SVD passes)
+    # Base matrices (normalized + transposed variants)
+    base = 3 * (nf * nt)  # rmatrixin_b, A_b, AB1
+
+    # Two SVDs worth of outputs (U, s, Vh) and one V
+    svd_2passes = 2 * (nf * k + k + k * nt) + (nf * k)
+
+    # Lambda selection buffers (two passes): vals (k*nmu), discr (nmu), coef (k)
+    lam_sel = 2 * (k * nmu_eff + nmu_eff + k)
+
+    # Weights and outputs (bvec, dem, edem, elogt, dn_pred)
+    out_terms = (3 * nt) + nt + nt + nf
+
+    # EDEM/ELOGT internals: kVT (nt*k), kdag (nt*nf), kdagk (nt*nt)
+    err_terms = (nt * k) + (nt * nf) + (nt * nt)
+
+    floats_per_sample = base + svd_2passes + lam_sel + out_terms + err_terms
+    # Safety for cuSOLVER workspaces, allocator overhead, ping-pong staging, etc.
+    safety = 1.5
     bytes_f64 = 8.0
-    return int(bytes_f64 * safety * (core_terms + io_terms + 64))
+    est = bytes_f64 * safety * (floats_per_sample + 64)
+    # Optional runtime tuner: multiply estimate by a scale factor
+    # e.g., MULTIGPU_BPS_SCALE=0.9 to attempt slightly larger batches.
+    try:
+        scale = float(os.environ.get("MULTIGPU_BPS_SCALE", "1.0"))
+        scale = float(min(max(scale, 0.25), 4.0))
+    except Exception:
+        scale = 1.0
+    return int(est * scale)
 
 
 def _adaptive_batch_size(na: int, nf: int, nt: int, nmu: int) -> int:
@@ -68,10 +88,12 @@ def _adaptive_batch_size(na: int, nf: int, nt: int, nmu: int) -> int:
         if bytes_per <= 0:
             return default
         try:
+            # Default target fraction of free memory; configurable via env
+            # Keep consistent with demmap_pos OOM paths (default 0.7)
             frac_env = float(os.environ.get("MULTIGPU_BATCH_MEM_FRAC", "0.7"))
             mem_frac = float(min(max(frac_env, 0.1), 0.9))
         except Exception:
-            mem_frac = 0.55
+            mem_frac = 0.7
         est = int((free_b * mem_frac) // bytes_per)
         return max(1, min(est, na))
     except Exception:

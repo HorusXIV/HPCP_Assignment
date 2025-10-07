@@ -119,6 +119,7 @@ def demmap_pos(
             np.zeros((0, nf), dtype=np.float64),
         )
 
+    # Host-side fallbacks (will be replaced by pinned buffers when GPU path)
     dem = np.zeros((na, nt), dtype=np.float64)
     edem = np.zeros((na, nt), dtype=np.float64)
     elogt = np.zeros((na, nt), dtype=np.float64)
@@ -376,7 +377,12 @@ def demmap_pos(
                             ed_b = ed_dev[slot][:cur, :]
                             # Preserve original errors for residuals; clamp a normalized copy for stability
                             ed_b_orig = ed_b
-                            ed_b = cp.maximum(ed_b, cp.array(1e-12, dtype=cp.float64))
+                            # Lift clamps using per-row median heuristic to avoid division blow-up on near-zero edn
+                            med = cp.median(ed_b, axis=1, keepdims=True)
+                            floor = cp.maximum(
+                                cp.array(1e-12, dtype=cp.float64), 1e-6 * med
+                            )
+                            ed_b = cp.maximum(ed_b, floor)
 
                             rmatrixin_b = (
                                 rmatrix_d[None, :, :] * (1.0 / ed_b)[:, None, :]
@@ -384,10 +390,10 @@ def demmap_pos(
                             A_b = cp.transpose(rmatrixin_b, (0, 2, 1))
                             dprime_b = dn_b / ed_b
 
-                            # Guard invalid rows (NaN/Inf or non-positive product after normalization)
+                            # Guard invalid rows: require finite and strictly positive elements
                             valid_rows = cp.logical_and(
                                 cp.all(cp.isfinite(dprime_b), axis=1),
-                                cp.prod(dprime_b, axis=1) > 0.0,
+                                cp.all(dprime_b > 0.0, axis=1),
                             )
                             # Zero-out invalid rows in inputs to keep SVD stable; they'll be set to zeros in outputs later
                             inv_mask = ~valid_rows
@@ -480,7 +486,8 @@ def demmap_pos(
                             coef = cp.matmul(
                                 cp.transpose(U, (0, 2, 1)), dprime_b[:, :, None]
                             ).squeeze(-1)
-                            # Vendor parity: normalized system -> sum(err^2)=nf
+                            # In the normalized system, the discrepancy target
+                            # uses sum(err^2)=nf (matches vendor behavior)
                             err_sq = cp.full((cur,), float(nf), dtype=cp.float64)
 
                     next_b0 = b1
@@ -505,6 +512,11 @@ def demmap_pos(
                                 discr = arg_sum - (err_sq * reg_vec)[:, None]
                                 idx_mu = cp.argmin(cp.abs(discr), axis=1)
                                 lamb = mu_b[cp.arange(cur), idx_mu]
+                                # Enforce a lambda floor tied to spectrum to prevent degenerate amplification
+                                s_max2 = cp.max(s_safe**2, axis=1)
+                                lam_floor = 1e-12 * s_max2
+                                lamb = cp.maximum(lamb, lam_floor)
+
                                 filt = s / (s**2 + lamb[:, None])
                                 xprime = cp.matmul(
                                     V, (filt * coef)[:, :, None]
@@ -646,7 +658,6 @@ def demmap_pos(
                 idx = b1
                 cur_batch = attempt
                 slot = 1 - slot
-                cp.get_default_memory_pool().free_all_blocks()
             except cp.cuda.memory.OutOfMemoryError:
                 with nvtx_range("OOM_RETRY", color=0xD32F2F):
                     try:
