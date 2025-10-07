@@ -155,6 +155,87 @@ def scatterv_array(comm, array, counts, dtype=None):
     return recvbuf.reshape(local_rows, cols)
 
 
+def iscatterv_array(comm, array, counts, dtype=None):
+    """Nonblocking scatter of rows of a 2D array across ranks.
+
+    Args:
+        comm: MPI communicator.
+        array: 2D array on root; ``None`` on other ranks.
+        counts: List of row counts per rank; must sum to total rows.
+        dtype: Data type for non-root allocation if ``array`` is ``None``.
+
+    Returns:
+        Tuple[np.ndarray, object]: Local 2D slice on each rank and the pending request.
+    """
+    import numpy as _np
+
+    rank = comm.Get_rank() if comm is not None else 0
+    if comm is None:
+        return array, None
+
+    displs_rows = [sum(counts[:i]) for i in range(len(counts))]
+
+    if rank == 0:
+        rows = int(array.shape[0])
+        cols = int(array.shape[1])
+        flat = _np.ascontiguousarray(array).ravel()
+        send_dtype = array.dtype
+    else:
+        rows = None
+        cols = None
+        flat = None
+        send_dtype = None
+
+    rows = comm.bcast(rows, root=0)
+    cols = comm.bcast(cols, root=0)
+
+    if sum(counts) != rows:
+        raise ValueError(f"counts must sum to rows ({sum(counts)} != {rows})")
+
+    local_rows = int(counts[rank])
+
+    if rank == 0:
+        recv_dtype = send_dtype
+    else:
+        if dtype is None:
+            raise ValueError("dtype must be provided on non-root ranks")
+        recv_dtype = _np.dtype(dtype)
+
+    itemsize = int(_np.dtype(recv_dtype).itemsize)
+    recvbuf = _np.empty(local_rows * cols, dtype=recv_dtype)
+
+    sendcounts_bytes = [int(c * cols * itemsize) for c in counts]
+    displs_bytes = [int(d * cols * itemsize) for d in displs_rows]
+
+    sendbuf_bytes = flat.view(_np.uint8) if flat is not None else None
+    recvbuf_bytes = recvbuf.view(_np.uint8)
+
+    try:
+        from mpi4py import MPI as _MPI
+    except Exception as _:
+        _MPI = None
+
+    try:
+        from src.common.nvtx import nvtx_range  # lazy import
+    except Exception:
+        from contextlib import contextmanager as _cm
+
+        @_cm
+        def nvtx_range(_m):  # type: ignore
+            yield
+
+    with nvtx_range("MPI.Iscatterv"):
+        req = comm.Iscatterv(
+            [sendbuf_bytes, sendcounts_bytes, displs_bytes, _MPI.BYTE]
+            if rank == 0
+            else None,
+            recvbuf_bytes,
+            root=0,
+        )
+
+    return recvbuf.reshape(local_rows, cols), req
+
+
 def gatherv_array(comm, local_array, counts, root=0):
     """Gather rows from all ranks into a single 2D array on ``root``.
 
@@ -270,6 +351,94 @@ def gatherv_array(comm, local_array, counts, root=0):
     if rank == root:
         return recvbuf
     return None
+
+
+def igatherv_array(comm, local_array, counts, root=0):
+    """Nonblocking gather of rows from all ranks into a 2D array on ``root``.
+
+    Starts an ``Igatherv`` and returns immediately with a request. The caller
+    must ensure that the send/recv buffers remain alive until the request
+    completes.
+
+    Args:
+        comm: MPI communicator.
+        local_array: 2D local block on the current rank.
+        counts: Row counts per rank (same list used in scatterv).
+        root: Root rank that receives the full array.
+
+    Returns:
+        Tuple[Optional[np.ndarray], object]: ``(recvbuf, request)`` where
+        ``recvbuf`` is the full array on ``root`` (None on others) and
+        ``request`` is the pending MPI request.
+    """
+    import numpy as _np
+
+    rank = comm.Get_rank() if comm is not None else 0
+    size = comm.Get_size() if comm is not None else 1
+    cols = int(local_array.shape[1])
+
+    if len(counts) != size:
+        raise ValueError(f"counts length {len(counts)} does not match comm size {size}")
+
+    sendbuf2d = _np.ascontiguousarray(local_array)
+    recvcounts_elems = [int(c * cols) for c in counts]
+    displs_elems = [0] * size
+    for i in range(1, size):
+        displs_elems[i] = displs_elems[i - 1] + recvcounts_elems[i - 1]
+
+    try:
+        from mpi4py import MPI as _MPI
+
+        mpitype = _MPI._typedict.get(_np.dtype(sendbuf2d.dtype).char)  # type: ignore[attr-defined]
+    except Exception:
+        mpitype = None
+
+    sendbuf_flat = sendbuf2d.ravel()
+    if rank == root:
+        total_rows = int(sum(counts))
+        recvbuf = _np.empty((total_rows, cols), dtype=sendbuf2d.dtype)
+        recv_flat = recvbuf.ravel()
+    else:
+        recvbuf = None
+        recv_flat = None
+
+    try:
+        from src.common.nvtx import nvtx_range  # lazy import
+    except Exception:
+        from contextlib import contextmanager as _cm
+
+        @_cm
+        def nvtx_range(_m):  # type: ignore
+            yield
+
+    with nvtx_range("MPI.Igatherv"):
+        if mpitype is None:
+            # Fallback using bytes
+            itemsize = int(_np.dtype(sendbuf2d.dtype).itemsize)
+            sendbuf_bytes = sendbuf_flat.view(_np.uint8)
+            if rank == root:
+                recvbuf_bytes = recv_flat.view(_np.uint8)
+            else:
+                recvbuf_bytes = None
+            recvcounts_bytes = [int(x * itemsize) for x in recvcounts_elems]
+            displs_bytes = [int(x * itemsize) for x in displs_elems]
+            req = comm.Igatherv(
+                sendbuf_bytes,
+                [recvbuf_bytes, recvcounts_bytes, displs_bytes, _MPI.BYTE]
+                if rank == root
+                else None,
+                root=root,
+            )
+        else:
+            req = comm.Igatherv(
+                [sendbuf_flat, mpitype],
+                [recv_flat, recvcounts_elems, displs_elems, mpitype]
+                if rank == root
+                else None,
+                root=root,
+            )
+
+    return recvbuf, req
 
 
 def set_device_for_local_rank(comm, prefer_visible=True):
