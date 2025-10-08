@@ -72,11 +72,17 @@ def demmap_pos(
 
     Returns:
         tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-            - dem: (na, nt) reconstructed DEM
-            - edem: (na, nt) error estimates per temperature bin
-            - elogt: (na, nt) effective log(T) half-width per bin
-            - chisq: (na,) reduced chi-square per sample
-            - dn_reg: (na, nf) predicted data under the chosen regularization
+            - dem:
+                The DEM, has shape nx*ny*nt and units out depends on the input units of tresp and setting of emd_ret
+            - edem:
+                Vertical errors on the DEM, same units as DEM.
+            - elogt:
+                Horizontal errors on temperature, as the name suggests in logT.
+            - chisq:
+                The final chisq, shape nx*ny. Pixels which have undergone more iterations will in general have higher chisq.
+            - dn_reg:
+                The simulated dn counts, shape nx*ny*nf. This is obtained by multiplying the DEM(T) by the filter
+                response K(f,T) for each channel, very important for comparing with the initial data.
 
     Raises:
         ImportError: If CuPy is not installed/available at runtime.

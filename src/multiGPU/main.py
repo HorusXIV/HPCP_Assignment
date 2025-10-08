@@ -143,6 +143,7 @@ def main():
             data = mio.load_npz(path)
         dn = data.get("dn", None)
         edn = data.get("edn", None)
+        spatial_shape = None  # (ny, nx) when available
         if dn is None:
             if "bands" in data:
                 bands = data["bands"]
@@ -151,6 +152,7 @@ def main():
                         ("Unexpected `bands` shape; expected (nf, ny, nx)")
                     )
                 nf, ny, nx = bands.shape
+                spatial_shape = (ny, nx)
                 n_pixels = ny * nx
                 bands_flat = bands.reshape(nf, n_pixels)
                 if args.max_samples is not None and n_pixels > args.max_samples:
@@ -162,14 +164,23 @@ def main():
             else:
                 arrays = [v for v in data.values()]
                 if len(arrays) >= 2:
-                    dn2d = mio.ensure_2d_dn(arrays[0])
+                    # Try to infer spatial shape when last axis is filters
+                    dn_arr = np.asarray(arrays[0])
+                    if dn_arr.ndim == 3:
+                        # Assume (ny, nx, nf)
+                        spatial_shape = dn_arr.shape[0], dn_arr.shape[1]
+                    dn2d = mio.ensure_2d_dn(dn_arr)
                     edn2d = mio.ensure_2d_dn(arrays[1])
                 else:
                     raise RuntimeError(
                         ("Input file missing required dn and edn arrays")
                     )
         else:
-            dn2d = mio.ensure_2d_dn(dn)
+            # Attempt to infer spatial shape before flattening
+            dn_arr = np.asarray(dn)
+            if dn_arr.ndim == 3:
+                spatial_shape = dn_arr.shape[0], dn_arr.shape[1]
+            dn2d = mio.ensure_2d_dn(dn_arr)
             edn2d = mio.ensure_2d_dn(edn)
         if edn2d.shape[0] != dn2d.shape[0]:
             if edn2d.shape[0] == 1:
@@ -183,7 +194,7 @@ def main():
             n_samples // size + (1 if i < (n_samples % size) else 0)
             for i in range(size)
         ]
-        return dn2d, edn2d, _counts, str(dn2d.dtype), str(edn2d.dtype)
+        return dn2d, edn2d, _counts, str(dn2d.dtype), str(edn2d.dtype), spatial_shape
 
     pipeline = os.environ.get("MULTIGPU_PIPELINE_FILES", "1") == "1"
 
@@ -194,13 +205,21 @@ def main():
     next_edn2d = None
     next_counts = None
     next_dtypes = (None, None)
+    next_spatial = None
 
     if pipeline and len(all_inputs) > 0 and rank == 0:
-        dn2d0, edn2d0, counts0, dn_dtype_name0, edn_dtype_name0 = _load_and_partition(
+        (
+            dn2d0,
+            edn2d0,
+            counts0,
+            dn_dtype_name0,
+            edn_dtype_name0,
+            spatial0,
+        ) = _load_and_partition(
             all_inputs[0]
         )
     else:
-        dn2d0 = edn2d0 = counts0 = dn_dtype_name0 = edn_dtype_name0 = None
+        dn2d0 = edn2d0 = counts0 = dn_dtype_name0 = edn_dtype_name0 = spatial0 = None
 
     while idx_file < len(all_inputs):
         input_path = all_inputs[idx_file]
@@ -219,12 +238,18 @@ def main():
                     if pipeline and dn2d0 is not None:
                         dn2d, edn2d, counts = dn2d0, edn2d0, counts0
                         dn_dtype_name, edn_dtype_name = dn_dtype_name0, edn_dtype_name0
+                        spatial_shape = spatial0
                     else:
-                        dn2d, edn2d, counts, dn_dtype_name, edn_dtype_name = (
-                            _load_and_partition(input_path)
-                        )
+                        (
+                            dn2d,
+                            edn2d,
+                            counts,
+                            dn_dtype_name,
+                            edn_dtype_name,
+                            spatial_shape,
+                        ) = _load_and_partition(input_path)
                 else:
-                    dn2d = edn2d = counts = dn_dtype_name = edn_dtype_name = None
+                    dn2d = edn2d = counts = dn_dtype_name = edn_dtype_name = spatial_shape = None
 
                 if comm is not None:
                     with nvtx_range("BCAST_COUNTS", color=0x1565C0):
@@ -234,6 +259,8 @@ def main():
                         edn_dtype_name = comm.bcast(edn_dtype_name, root=0)
                         dn_dtype = np.dtype(dn_dtype_name)
                         edn_dtype = np.dtype(edn_dtype_name)
+                    with nvtx_range("BCAST_SPATIAL", color=0x1B5E20):
+                        spatial_shape = comm.bcast(spatial_shape, root=0)
                     # Nonblocking scatters to overlap with GPU compute
                     with nvtx_range("SCATTER_DN", color=0x43A047):
                         local_dn, req_sd = mmpi.iscatterv_array(
@@ -344,13 +371,15 @@ def main():
                 # While current is gathering on root, pre-stage next file's load/partition on root
                 next_dn2d = next_edn2d = next_counts = None
                 next_dtypes = (None, None)
+                next_spatial = None
                 if pipeline and (idx_file + 1) < len(all_inputs) and rank == 0:
                     with nvtx_range("PRELOAD_NEXT", color=0x0097A7):
-                        nd, ne, ncounts, ndt, edt = _load_and_partition(
+                        nd, ne, ncounts, ndt, edt, nsp = _load_and_partition(
                             all_inputs[idx_file + 1]
                         )
                         next_dn2d, next_edn2d, next_counts = nd, ne, ncounts
                         next_dtypes = (ndt, edt)
+                        next_spatial = nsp
 
                 if rank == 0 and (dem_all is not None or req is not None):
                     # Ensure gather completion on root
@@ -378,6 +407,20 @@ def main():
                         f"Computed total DEMs: {dem_all.shape[0]}",
                         extra={"general": True},
                     )
+                    # If spatial shape is known and matches, reshape to (ny, nx, nt)
+                    if spatial_shape is not None:
+                        try:
+                            ny, nx = int(spatial_shape[0]), int(spatial_shape[1])
+                            if ny * nx == dem_all.shape[0]:
+                                dem_all = dem_all.reshape(ny, nx, -1)
+                            else:
+                                log.warning(
+                                    "Cannot reshape DEM to (ny,nx,nt): %d != ny*nx (%d)",
+                                    dem_all.shape[0],
+                                    ny * nx,
+                                )
+                        except Exception:
+                            log.exception("Failed to reshape DEM to (ny,nx,nt)")
                     # Saving – optionally overlap by dispatching to a background thread
                     out_dir = results_root
                     os.makedirs(out_dir, exist_ok=True)

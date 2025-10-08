@@ -62,12 +62,6 @@ def _prepare_rmatrix_and_axes(
         - dlogt: Per-bin widths in log10(T) of shape ``(nt,)``.
         - sclf: Scalar numeric scaling (``1e15``) applied to ``rmatrix`` to
           keep values in a numerically comfortable range.
-
-    Physics note:
-        DEM vs EMD. DEM is the emission measure per unit log10 temperature
-        (a density-squared weighted volume distribution). EMD integrates DEM
-        across finite temperature bins. Converting between the two introduces
-        a multiplicative bin factor proportional to the linear bin width.
     """
     temps = np.asarray(temps)
     # Compute logt bin centers and widths in log10 space
@@ -158,13 +152,15 @@ def _reshape_from_2d(
         matches the original input and the last axis is ``nt``.
     """
     if len(orig_shape) == 1:
-        # nf -> nt
-        return arr2d.reshape(1, nt).squeeze()
+        # nf -> nt (keep 1D for truly vector inputs)
+        return arr2d.reshape(nt)
     if len(orig_shape) == 2:
-        nx, nf = orig_shape
-        return arr2d.reshape(nx, 1, nt).squeeze()
-    # (..., nf) -> (..., nt)
-    return arr2d.reshape(*orig_shape[:-1], nt).squeeze()
+        nx, _nf = orig_shape
+        # For 2D inputs, keep 2D outputs (nx, nt) so MPI gather and callers
+        # expecting (n_samples, nt) continue to work.
+        return arr2d.reshape(nx, nt)
+    # (..., nf) -> (..., nt) without squeezing singleton spatial dims
+    return arr2d.reshape(*orig_shape[:-1], nt)
 
 
 def dn2dem_pos(
@@ -249,13 +245,6 @@ def dn2dem_pos(
         RuntimeError: If no CUDA device is available or GPU memory is
             insufficient even after automatic downshifts in batch size.
         ImportError: If CuPy is unavailable in the execution environment.
-
-    Physics primer:
-        Each filter measures a weighted integral of the plasma's emission
-        across temperature. The goal is to recover the temperature distribution
-        (DEM/EMD) that best explains the observations under measurement noise
-        and a smoothness prior. Regularization balances data fit and smoothness
-        to avoid overfitting noise.
     """
     with nvtx_range("DN2DEM_PREP", color=0x4CAF50):
         # Normalize input shapes to 2D (n_samples, nf)
@@ -356,7 +345,8 @@ def dn2dem_pos(
         # interpretation under a Gaussian approximation: 2*sqrt(2*ln 2)
         fwhm_to_sigma = 2.0 * np.sqrt(2.0 * np.log(2.0))
         elogt = _reshape_from_2d(elogt2d, dn_shape, nt) / fwhm_to_sigma
-        chisq = chisq1d.reshape(*dn_shape[:-1]).squeeze()
+        # Preserve spatial dimensions; do not squeeze singleton axes
+        chisq = chisq1d.reshape(*dn_shape[:-1])
         dn_reg = dnreg2d.reshape(*dn_shape)
 
         # EMD/DEM conversion at return as per vendor

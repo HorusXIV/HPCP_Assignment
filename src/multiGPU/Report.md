@@ -91,7 +91,6 @@ This was encouraging, but there was still a problem: out‑of‑memory (OOM) err
 
 There were multiple approaches to improve this (for example, statically reducing the number of μ‑grid points), but I wanted to keep vendor parity as high as possible. So I focused on improving the memory‑handling logic. Previously, after each OOM, the batch size was simply halved. The new approach is more robust: flush reclaimable pool blocks before sizing so the estimate reflects real free memory; set the target fraction of free memory to 0.7 by default (tunable via the `MULTIGPU_BATCH_MEM_FRAC` environment variable) to leave headroom for library overhead.
 
-
 ### Experiment 2: Memory‑Handling Logic
 
 The test setup matches the previous experiment: 3 rounds of 10 images each, measuring wall time. I discarded the first two rounds (warm‑up) and performed a one‑sided Welch’s t‑test on the remaining data. Again, all data were collected from NVIDIA Nsight reports.
@@ -146,6 +145,9 @@ Time in seconds per image. Even though this is the never version rather than the
 
 #### Conclusion
 The measurements show that the new memory‑handling logic has a lower average wall time per image than the old implementation. The t‑test yields a p‑value of $$3.671\mathrm{e}{-08}$$, which is far below the significance level of 0.05, leading to rejection of the null hypothesis. This indicates a statistically significant difference in wall time between the two implementations, with the new memory‑handling logic being faster.
+
+## Wrapup and Restoring Vendor Parity
+This lead to great results. So to finalize and check my result I read a bit into the Science behind the Differential Emission measure (DEM) and found that results are expected to be somewhere between 10^20 and 10^26. However My results were somwhere in the Range of 10^80.
 
 ## Summary
 
