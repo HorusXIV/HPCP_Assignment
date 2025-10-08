@@ -56,9 +56,7 @@ class ConsoleFilter(logging.Filter):
 
 def _make_formatter():
     """Return a formatter that tolerates a missing ``rank`` attribute."""
-    fmt = (
-        "%(asctime)s - rank=%(rank)s - %(levelname)s - %(name)s - %(message)s"
-    )
+    fmt = "%(asctime)s - rank=%(rank)s - %(levelname)s - %(name)s - %(message)s"
 
     class SafeFormatter(logging.Formatter):
         def format(self, record: logging.LogRecord) -> str:
@@ -82,15 +80,19 @@ def setup_logging(
 ) -> logging.Logger:
     """Initialize per-rank logging and optional rank-0 console output.
 
+    This configures the root logger so any module can use ``logging.getLogger``
+    without local setup. File logging is suppressed by default for levels
+    ``>= WARNING`` to keep clusters tidy, but can be forced via env.
+
     Args:
-      results_dir: Directory where a ``rank_logs/`` subfolder will be created
-        when per-rank files are enabled.
-      rank: MPI rank id.
-      size: MPI world size. Reserved for API stability; not used.
-      console: Whether to stream to stdout on rank 0.
+        results_dir: Directory where a ``rank_logs/`` subfolder will be created
+            when per-rank files are enabled.
+        rank: MPI rank id.
+        size: MPI world size. Reserved for API stability; not used.
+        console: Whether to stream to stdout on rank 0.
 
     Returns:
-      The configured root logger (root namespace).
+        The configured root logger (root namespace).
     """
     os.makedirs(results_dir, exist_ok=True)
     root = logging.getLogger()
@@ -107,16 +109,13 @@ def setup_logging(
     root.addFilter(RankFilter(rank))
 
     quiet_mode = (
-        _lvl >= logging.WARNING
-        and os.environ.get("MULTIGPU_QUIET", "1") == "1"
+        _lvl >= logging.WARNING and os.environ.get("MULTIGPU_QUIET", "1") == "1"
     )
     want_rank_files = (
         os.environ.get("MULTIGPU_RANK_FILES", "0") == "1" or verbose_enabled()
     )
     if (not quiet_mode) or want_rank_files:
-        per_rank_log = os.path.join(
-            results_dir, "rank_logs", f"rank{rank:03d}.log"
-        )
+        per_rank_log = os.path.join(results_dir, "rank_logs", f"rank{rank:03d}.log")
         os.makedirs(os.path.dirname(per_rank_log), exist_ok=True)
         fh_rank = logging.FileHandler(per_rank_log, mode="a")
         fh_rank.setLevel(_lvl)
@@ -136,7 +135,11 @@ def setup_logging(
 
 
 def shutdown_logging():
-    """Flush and close handlers for a clean shutdown."""
+    """Flush and close handlers for a clean shutdown.
+
+    Ensures all file descriptors are closed to avoid log corruption or locked
+    files on network filesystems.
+    """
     root = logging.getLogger()
     for h in list(root.handlers):
         try:
