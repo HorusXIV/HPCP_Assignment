@@ -147,13 +147,13 @@ Time in seconds per image. Even though this is the never version rather than the
 The measurements show that the new memory‑handling logic has a lower average wall time per image than the old implementation. The t‑test yields a p‑value of $$3.671\mathrm{e}{-08}$$, which is far below the significance level of 0.05, leading to rejection of the null hypothesis. This indicates a statistically significant difference in wall time between the two implementations, with the new memory‑handling logic being faster.
 
 ## Wrapup and Restoring Vendor Parity
-After the performance work, a final sanity check against the additional sources revealed a implementation issue: my runs produced DEMs around 10^80. I found the root cause was an ill‑conditioned response matrix. So far the script was using a trivial, all‑ones response (K) as tresp, which makes the inversion nearly singular; the discrepancy principle then picked very small λ and amplified noise into astronomically large DEM values. 
-To fix this, I replaced the all‑ones K with realistic, well‑behaved synthetic responses and bin‑average them onto the DEM grid (logt, dlogt) so the solver sees an (nt × nf) matrix consistent with the baseline/Vendor pipeline and I added an $$lambda$$ floor to avoid extreme values.
-Additionally I wired in an dn2dem_pos wrapper and organized my code to match the vendor structure more closely and will be easier to read.
+Following the performance work, a final sanity check against the additional sources revealed an implementation issue: my runs produced DEMs of around 10⁸⁰. I found that the root cause was an ill-conditioned response matrix. The script had been using a trivial all-ones response matrix (K) as the response, which made the inversion nearly singular. The discrepancy principle then picked a very small lambda and amplified the noise, resulting in astronomically large DEM values. 
+To resolve this issue, I replaced the all-ones K with realistic, well-behaved synthetic responses, averaging them into bins and mapping them onto the DEM grid (logt, dlogt). This ensures that the solver recognises an (nt × nf) matrix that is consistent with the baseline/vendor pipeline. I also added a floor to the lambda to prevent extreme values.
+I also wired in a dn2dem_pos wrapper and organised my code to more closely match the vendor structure, which will make it easier to read. However, gathering all the results at root rank adds some overhead, increasing the time per image to around 36 seconds.
 
 ## Overlapping Transfers and Compute
-To reduce the total runtime, I then implemented Overlapping Transfers and compute as much as possible. While the main script is saving the data, the next image is already being loaded and processed in the Background.
-While this yields no compute time savings, it helps keep the GPU fed with work.
+To reduce the total runtime, I implemented overlapping transfers and computed as much as possible. While the main script is saving the data, the next image is loaded and processed in the background.
+Although this does not save any compute time, it helps to keep the GPU busy and reduces the overall wall time to an average of roughly 30 seconds.
 
 ## Summary
 

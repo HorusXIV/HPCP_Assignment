@@ -212,9 +212,18 @@ def demmap_pos(
 
         # Streams and device constants (allocate first, then size the batch)
         with nvtx_range("DEM_DEVICE_CONSTS", color=0x00796B):
-            compute_stream = cp.cuda.Stream(non_blocking=True)
-            copy_stream = cp.cuda.Stream(non_blocking=True)
-            h2d_stream = cp.cuda.Stream(non_blocking=True)
+            # Prefer higher priority for transfer streams to keep copies moving under load
+            try:
+                prio_high = -1
+                prio_norm = 0
+                compute_stream = cp.cuda.Stream(non_blocking=True, priority=prio_norm)
+                copy_stream = cp.cuda.Stream(non_blocking=True, priority=prio_high)
+                h2d_stream = cp.cuda.Stream(non_blocking=True, priority=prio_high)
+            except Exception:
+                # Fallback if priorities unsupported
+                compute_stream = cp.cuda.Stream(non_blocking=True)
+                copy_stream = cp.cuda.Stream(non_blocking=True)
+                h2d_stream = cp.cuda.Stream(non_blocking=True)
 
             rmatrix_d = cp.asarray(rmatrix)
             dlogt_d = cp.asarray(dlogt)

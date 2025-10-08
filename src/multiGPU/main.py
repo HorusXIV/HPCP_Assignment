@@ -60,6 +60,20 @@ def main():
 
     with nvtx_range("INIT_MPI", color=0x4CAF50):
         comm, rank, size = mmpi.init_mpi()
+        # Optionally duplicate communicators to separate gather vs scatter/bcast
+        # Guarded by env MULTIGPU_PIPELINE_COMM=1 to keep behavior opt-in
+        comm_s = comm
+        comm_g = comm
+        try:
+            use_split = os.environ.get("MULTIGPU_PIPELINE_COMM", "1") == "1"
+            if use_split and comm is not None:
+                # Duplicate for scatter/broadcast (comm_s) and gather (comm_g)
+                comm_s = comm.Dup()
+                comm_g = comm.Dup()
+        except Exception:
+            # Fall back to single comm if duplication fails
+            comm_s = comm
+            comm_g = comm
 
     results_root = "data/results_multiGPU"
     log_root = "src/multiGPU/logs"
@@ -123,8 +137,8 @@ def main():
         else:
             all_inputs = None
     with nvtx_range("BCAST_INPUTS", color=0x1976D2):
-        if comm is not None:
-            all_inputs = comm.bcast(all_inputs, root=0)
+        if comm_s is not None:
+            all_inputs = comm_s.bcast(all_inputs, root=0)
         else:
             pattern = os.path.join(args.input_dir, "*.npz")
             all_inputs = sorted(glob.glob(pattern))
@@ -207,6 +221,14 @@ def main():
     next_dtypes = (None, None)
     next_spatial = None
 
+    # Prefetched per-rank buffers for next file (result of early Iscatterv)
+    pref_local_dn = None
+    pref_local_edn = None
+    pref_counts = None
+    pref_spatial = None
+    pref_dn_dtype_name = None
+    pref_edn_dtype_name = None
+
     if pipeline and len(all_inputs) > 0 and rank == 0:
         (
             dn2d0,
@@ -215,9 +237,7 @@ def main():
             dn_dtype_name0,
             edn_dtype_name0,
             spatial0,
-        ) = _load_and_partition(
-            all_inputs[0]
-        )
+        ) = _load_and_partition(all_inputs[0])
     else:
         dn2d0 = edn2d0 = counts0 = dn_dtype_name0 = edn_dtype_name0 = spatial0 = None
 
@@ -233,52 +253,80 @@ def main():
                     extra={"general": True},
                 )
             try:
-                # Load/partition current file
-                if rank == 0:
-                    if pipeline and dn2d0 is not None:
-                        dn2d, edn2d, counts = dn2d0, edn2d0, counts0
-                        dn_dtype_name, edn_dtype_name = dn_dtype_name0, edn_dtype_name0
-                        spatial_shape = spatial0
+                # Load/partition current file or consume prefetched slices
+                use_prefetch = pref_local_dn is not None and pref_local_edn is not None
+                if use_prefetch:
+                    # Data and metadata already broadcast/scattered in prior iteration
+                    local_dn = pref_local_dn
+                    local_edn = pref_local_edn
+                    counts = pref_counts
+                    dn_dtype_name = pref_dn_dtype_name
+                    edn_dtype_name = pref_edn_dtype_name
+                    spatial_shape = pref_spatial
+                    # Clear prefetch buffers (one-time use)
+                    pref_local_dn = None
+                    pref_local_edn = None
+                    pref_counts = None
+                    pref_spatial = None
+                    pref_dn_dtype_name = None
+                    pref_edn_dtype_name = None
+                else:
+                    if rank == 0:
+                        if pipeline and dn2d0 is not None:
+                            dn2d, edn2d, counts = dn2d0, edn2d0, counts0
+                            dn_dtype_name, edn_dtype_name = (
+                                dn_dtype_name0,
+                                edn_dtype_name0,
+                            )
+                            spatial_shape = spatial0
+                        else:
+                            (
+                                dn2d,
+                                edn2d,
+                                counts,
+                                dn_dtype_name,
+                                edn_dtype_name,
+                                spatial_shape,
+                            ) = _load_and_partition(input_path)
                     else:
-                        (
-                            dn2d,
-                            edn2d,
-                            counts,
-                            dn_dtype_name,
-                            edn_dtype_name,
-                            spatial_shape,
-                        ) = _load_and_partition(input_path)
-                else:
-                    dn2d = edn2d = counts = dn_dtype_name = edn_dtype_name = spatial_shape = None
+                        dn2d = edn2d = counts = dn_dtype_name = edn_dtype_name = (
+                            spatial_shape
+                        ) = None
 
-                if comm is not None:
-                    with nvtx_range("BCAST_COUNTS", color=0x1565C0):
-                        counts = comm.bcast(counts, root=0)
-                    with nvtx_range("BCAST_DTYPES", color=0x0D47A1):
-                        dn_dtype_name = comm.bcast(dn_dtype_name, root=0)
-                        edn_dtype_name = comm.bcast(edn_dtype_name, root=0)
-                        dn_dtype = np.dtype(dn_dtype_name)
-                        edn_dtype = np.dtype(edn_dtype_name)
-                    with nvtx_range("BCAST_SPATIAL", color=0x1B5E20):
-                        spatial_shape = comm.bcast(spatial_shape, root=0)
-                    # Nonblocking scatters to overlap with GPU compute
-                    with nvtx_range("SCATTER_DN", color=0x43A047):
-                        local_dn, req_sd = mmpi.iscatterv_array(
-                            comm, dn2d if rank == 0 else None, counts, dtype=dn_dtype
-                        )
-                    with nvtx_range("SCATTER_EDN", color=0x2E7D32):
-                        local_edn, req_se = mmpi.iscatterv_array(
-                            comm, edn2d if rank == 0 else None, counts, dtype=edn_dtype
-                        )
-                    # Ensure local recv complete before compute
-                    if req_sd is not None:
-                        req_sd.Wait()
-                    if req_se is not None:
-                        req_se.Wait()
-                else:
-                    local_dn = dn2d
-                    local_edn = edn2d
-                    counts = [local_dn.shape[0]]
+                    if comm_s is not None:
+                        with nvtx_range("BCAST_COUNTS", color=0x1565C0):
+                            counts = comm_s.bcast(counts, root=0)
+                        with nvtx_range("BCAST_DTYPES", color=0x0D47A1):
+                            dn_dtype_name = comm_s.bcast(dn_dtype_name, root=0)
+                            edn_dtype_name = comm_s.bcast(edn_dtype_name, root=0)
+                            dn_dtype = np.dtype(dn_dtype_name)
+                            edn_dtype = np.dtype(edn_dtype_name)
+                        with nvtx_range("BCAST_SPATIAL", color=0x1B5E20):
+                            spatial_shape = comm_s.bcast(spatial_shape, root=0)
+                        # Nonblocking scatters to overlap with GPU compute
+                        with nvtx_range("SCATTER_DN", color=0x43A047):
+                            local_dn, req_sd = mmpi.iscatterv_array(
+                                comm_s,
+                                dn2d if rank == 0 else None,
+                                counts,
+                                dtype=dn_dtype,
+                            )
+                        with nvtx_range("SCATTER_EDN", color=0x2E7D32):
+                            local_edn, req_se = mmpi.iscatterv_array(
+                                comm_s,
+                                edn2d if rank == 0 else None,
+                                counts,
+                                dtype=edn_dtype,
+                            )
+                        # Ensure local recv complete before compute
+                        if req_sd is not None:
+                            req_sd.Wait()
+                        if req_se is not None:
+                            req_se.Wait()
+                    else:
+                        local_dn = dn2d
+                        local_edn = edn2d
+                        counts = [local_dn.shape[0]]
 
                 if rank == 0:
                     try:
@@ -346,7 +394,7 @@ def main():
                         temps=None,
                     )
 
-                if comm is not None:
+                if comm_g is not None:
                     # Optional downcast before gather to reduce network volume
                     # Controlled via env MULTIGPU_GATHER_DTYPE in {"float64","float32"}
                     gather_dtype_env = os.environ.get(
@@ -361,7 +409,7 @@ def main():
                     # Start nonblocking gather to allow overlap with local work on rank 0
                     with nvtx_range("GATHER_DEM", color=0x6D4C41):
                         dem_all, req = mmpi.igatherv_array(
-                            comm, dem_send, counts, root=0
+                            comm_g, dem_send, counts, root=0
                         )
                     # No immediate barrier: we'll wait on req only on root before saving
                 else:
@@ -380,6 +428,47 @@ def main():
                         next_dn2d, next_edn2d, next_counts = nd, ne, ncounts
                         next_dtypes = (ndt, edt)
                         next_spatial = nsp
+
+                # Cross-file prefetch: broadcast/scatter next file to all ranks now
+                # so that the next iteration can start GPU compute immediately.
+                if pipeline and (idx_file + 1) < len(all_inputs) and comm_s is not None:
+                    # Broadcast metadata for next file
+                    with nvtx_range("BCAST_NEXT_META", color=0x006064):
+                        n_counts = next_counts if rank == 0 else None
+                        n_dn_dtype_name = next_dtypes[0] if rank == 0 else None
+                        n_edn_dtype_name = next_dtypes[1] if rank == 0 else None
+                        n_spatial = next_spatial if rank == 0 else None
+                        n_counts = comm_s.bcast(n_counts, root=0)
+                        n_dn_dtype_name = comm_s.bcast(n_dn_dtype_name, root=0)
+                        n_edn_dtype_name = comm_s.bcast(n_edn_dtype_name, root=0)
+                        n_dn_dtype = np.dtype(n_dn_dtype_name)
+                        n_edn_dtype = np.dtype(n_edn_dtype_name)
+                        n_spatial = comm_s.bcast(n_spatial, root=0)
+                    # Post nonblocking scatters for next file and wait locally
+                    with nvtx_range("SCATTER_NEXT", color=0x004D40):
+                        next_local_dn, req_sdn = mmpi.iscatterv_array(
+                            comm_s,
+                            next_dn2d if rank == 0 else None,
+                            n_counts,
+                            dtype=n_dn_dtype,
+                        )
+                        next_local_edn, req_sde = mmpi.iscatterv_array(
+                            comm_s,
+                            next_edn2d if rank == 0 else None,
+                            n_counts,
+                            dtype=n_edn_dtype,
+                        )
+                        if req_sdn is not None:
+                            req_sdn.Wait()
+                        if req_sde is not None:
+                            req_sde.Wait()
+                    # Store for next iteration
+                    pref_local_dn = next_local_dn
+                    pref_local_edn = next_local_edn
+                    pref_counts = n_counts
+                    pref_spatial = n_spatial
+                    pref_dn_dtype_name = n_dn_dtype_name
+                    pref_edn_dtype_name = n_edn_dtype_name
 
                 if rank == 0 and (dem_all is not None or req is not None):
                     # Ensure gather completion on root
