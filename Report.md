@@ -3,10 +3,15 @@ HPC Assignment — Accelerating DEMREG
 # Contents
 - [Contents](#contents)
 - [Introduction](#introduction)
+- [Methodology](#methodology)
 - [Benchmarking](#benchmarking)
 - [Implementation](#implementation)
   - [Accelerating with Dask](#accelerating-with-dask)
-  - [Accelerating with Numba](#accelerating-with-numba)
+  - [Accelerating with Numba and CuPy](#accelerating-with-numba-and-cupy)
+    - [Initial Improvement of Baseline](#initial-improvement-of-baseline)
+    - [Transition to CuPy](#transition-to-cupy)
+    - [Profiling and Observations](#profiling-and-observations)
+    - [Conclusion](#conclusion)
   - [multiGPU Setup](#multigpu-setup)
     - [Baseline and First Principles](#baseline-and-first-principles)
     - [Multi‑GPU Distribution and Initial Improvements](#multigpu-distribution-and-initial-improvements)
@@ -17,19 +22,23 @@ HPC Assignment — Accelerating DEMREG
       - [Hypotheses](#hypotheses)
       - [Measurements](#measurements)
       - [Hypothesis test summary](#hypothesis-test-summary)
-      - [Conclusion](#conclusion)
+      - [Conclusion](#conclusion-1)
     - [Improving Memory Stability](#improving-memory-stability)
     - [Experiment 2: Memory‑Handling Logic](#experiment-2-memoryhandling-logic)
       - [Hypotheses](#hypotheses-1)
       - [Measurements](#measurements-1)
       - [Hypothesis test summary](#hypothesis-test-summary-1)
-      - [Conclusion](#conclusion-1)
+      - [Conclusion](#conclusion-2)
+    - [Wrapup and Restoring Vendor Parity](#wrapup-and-restoring-vendor-parity)
+    - [Overlapping Transfers and Compute](#overlapping-transfers-and-compute)
 - [Discussion](#discussion)
   - [Dask](#dask)
-  - [Numba](#numba)
-  - [multiGPU](#multigpu)
+  - [Numba/CuPy](#numbacupy)
     - [Lessons Learned](#lessons-learned)
     - [Future Work](#future-work)
+  - [multiGPU](#multigpu)
+    - [Lessons Learned](#lessons-learned-1)
+    - [Future Work](#future-work-1)
 
 # Introduction
 This project is based on the [DEMREG codebase](https://github.com/ianan/demreg),  
@@ -250,6 +259,16 @@ Time in seconds per image. Even though this is the never version rather than the
 
 #### Conclusion
 The measurements show that the new memory‑handling logic has a lower average wall time per image than the old implementation. The t‑test yields a p‑value of $$3.671\mathrm{e}{-08}$$, which is far below the significance level of 0.05, leading to rejection of the null hypothesis. This indicates a statistically significant difference in wall time between the two implementations, with the new memory‑handling logic being faster.
+
+
+### Wrapup and Restoring Vendor Parity
+Following the performance work, a final sanity check against the additional sources revealed an implementation issue: my runs produced DEMs of around $$10^{80}$$. I found that the root cause was an ill-conditioned response matrix. The script had been using a trivial all-ones response matrix (K) as the response, which made the inversion nearly singular. The discrepancy principle then picked a very small $$\lambda$$ and amplified the noise, resulting in astronomically large DEM values.
+To resolve this issue, I replaced the all-ones K with realistic, well-behaved synthetic responses, averaging them into bins and mapping them onto the DEM grid (logt, dlogt). This ensures that the solver recognises an (nt × nf) matrix that is consistent with the baseline/vendor pipeline. I also added a floor to the lambda to prevent extreme values.
+I also wired in a dn2dem_pos wrapper and organised my code to more closely match the vendor structure, which will make it easier to read. However, gathering all the results at root rank adds some overhead, increasing the time per image to around 36 seconds.
+
+### Overlapping Transfers and Compute
+To reduce the total runtime, I implemented overlapping transfers and computed as much as possible. While the main script is saving the data, the next image is loaded and processed in the background.
+Although this does not save any compute time, it helps to keep the GPU busy and reduces the overall wall time to an average of roughly 30 seconds.
 
 # Discussion
 
