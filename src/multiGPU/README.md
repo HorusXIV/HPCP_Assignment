@@ -5,7 +5,12 @@ This document describes how to run, monitor, and collect results for experiments
 
 What this module does
 ---------------------
-`src.multiGPU` reconstructs Differential Emission Measure (DEM) maps using a GPU-first solver. MPI is used to distribute rows (pixels) across ranks; each rank runs one GPU and internally batches work based on free device memory.
+`src.multiGPU` reconstructs Differential Emission Measure (DEM) maps using a GPU-first solver. MPI distributes rows (pixels) across ranks; each rank drives one GPU and internally batches work based on free device memory. The orchestration overlaps communication and computation across files:
+
+- Nonblocking gather of current results on a dedicated communicator
+- Immediate broadcast/scatter of the next file on a separate communicator
+- Prefetch of the next file’s local slices so GPUs can start the next compute without waiting for root
+- Optional async saving on rank 0
 
 Experiment initialization
 -------------------------
@@ -35,10 +40,13 @@ Run options
      - `--max-samples <N>`: optional cap for pixels when flattening `bands`
 
 What happens per run
-- Rank 0 enumerates `.npz` files in `INPUT_DIR`, broadcasts the list, then for each file:
-  1. Loads arrays and scatters rows across ranks.
-  2. Each rank runs the GPU kernel once; internal batch size is chosen adaptively.
-  3. Rank 0 gathers DEMs and writes a single output file per input.
+- Rank 0 enumerates `.npz` files in `INPUT_DIR`, broadcasts the list, then for each file i:
+  1. Loads/partitions file i (and, once i has started, also preloads file i+1).
+  2. Broadcasts counts/dtypes/spatial for i, then nonblockingly scatters dn/edn to all ranks.
+  3. Each rank computes on its GPU with internal batch pipelining (H2D → compute → D2H overlap), using pinned host buffers and prioritized copy streams where supported.
+  4. Nonblocking gather of DEM rows for file i to rank 0 on a separate communicator.
+  5. While gather(i) is in flight, rank 0 broadcasts/scatters file i+1 so all ranks can prefetch their local slices and be ready to compute immediately on the next loop.
+  6. Rank 0 waits for gather(i), reshapes (if applicable), and saves (optionally in a background thread).
 
 Logging mechanism
 -----------------
@@ -82,6 +90,10 @@ Runtime (code-level)
 - `MULTIGPU_VERBOSE` (`0/1`): Emit extra metrics during planning and OOM retries.
 - `MULTIGPU_PREEMPT` (`0/1`): Register preemption handlers (best-effort save + barrier).
 - `MULTIGPU_SAVE_COMPRESSED` (`0/1`): Save outputs with compression when `1`.
+- `MULTIGPU_ASYNC_SAVE` (`1`): Save on rank 0 in a background thread (copies the buffer to ensure safety).
+- `MULTIGPU_PIPELINE_FILES` (`1`): Enable cross-file pipelining (preload + prefetch next file).
+- `MULTIGPU_PIPELINE_COMM` (`1`): Use split MPI communicators to separate scatter/bcast and gather traffic.
+- `MULTIGPU_GATHER_DTYPE` (`float64`): Downcast DEM before gather to reduce network volume (set to `float32` for 2× bandwidth reduction if acceptable).
 
 Logging
 - `MULTIGPU_LOG_LEVEL` (`WARNING`): Root log level name (e.g., `INFO`, `DEBUG`).
@@ -93,6 +105,19 @@ Memory pools (advanced)
 - `MULTIGPU_POOL_LIMIT_BYTES` (unset): Soft-limit CuPy device pool by bytes.
 - `MULTIGPU_PINNED_POOL_LIMIT_BYTES` (`1 GiB`): Soft-limit pinned host memory pool.
 
+Performance notes and best practices
+------------------------------------
+- Overlap across files: Results gathering for file i is overlapped with broadcasting/scattering file i+1, so non-root ranks can start GPU compute sooner on the next iteration.
+- Overlap within a file: H2D staging, compute, and D2H copies are pipelined with multiple CUDA streams. Where supported, transfer streams use higher priority to keep copies progressing under load.
+- Pinned memory: Host buffers for D2H and MPI are pinned to improve transfer throughput.
+- Network volume: Use `MULTIGPU_GATHER_DTYPE=float32` to halve gather bandwidth if it meets accuracy requirements.
+
+Safety and constraints
+----------------------
+- Collective ordering: All ranks post nonblocking collectives in a consistent sequence. Split communicators (`MULTIGPU_PIPELINE_COMM=1`) reduce head-of-line blocking and simplify ordering.
+- MPI progress: Most stacks progress nonblocking collectives adequately; if you observe stalls, enable your MPI’s async progress or increase host-side MPI activity during prefetch phases.
+- Memory footprint: Cross-file prefetch holds next-file slices in memory per rank. Ensure sufficient host memory is available (rank 0 may transiently hold gathered results plus save buffers).
+
 Profiling (via Slurm launcher)
 - `PROFILE` (`0/1`): If `1`, run under `nsys profile` inside the container.
 - `NSYS_OPTS` (`cuda,nvtx,osrt,cublas,cusolver`): Trace domains.
@@ -103,3 +128,18 @@ Operational notes
 -----------------
 - GPU is required: if no CUDA device is visible, the solver raises a clear `RuntimeError`.
 - Batching is adaptive and OOM-aware; the kernel may downshift batch size automatically and will log the changes when verbose mode is enabled.
+
+Architecture notes
+------------------
+The GPU kernel implementation has been modularized for maintainability.
+
+- Public API: import directly from `src.multiGPU.kernels`:
+  - `demmap_pos`, `dem_inv_gsvd`, `dem_reg_map`, `safe_svd`, `safe_pinv`,
+    `estimate_batch_plan`, `nvtx_range`, `verbose_enabled`.
+- Modular package: `src/multiGPU/kernels/`
+  - `demmap_pos.py`: batched CuPy implementation of DEM reconstruction
+  - `dem_inv_gsvd.py`: GSVD-equivalent factorization via SVD
+  - `dem_reg_map.py`: discrepancy-principle lambda selection
+  - `linalg.py`: SVD and pseudo-inverse helpers with input sanitization
+  - `memory.py`: batch sizing and memory estimation utilities
+  - `utils.py`: NVTX ranges, verbosity flag, pinned host memory allocator

@@ -1,5 +1,6 @@
-# src/common/synthetic.py
+# src/common/responses.py
 from __future__ import annotations
+
 """
 Deterministic synthetic temperature responses for testing and demos.
 
@@ -67,10 +68,64 @@ def prepare_synthetic_responses(
     width = np.float32(0.15)
 
     # Build responses: (n_tresp, nf)
-    T_RESP = np.exp(-0.5 * ((logT[:, None] - centers[None, :]) / width) ** 2, dtype=np.float32)
+    # Note: np.exp has no dtype kwarg; cast after computation for clarity.
+    T_RESP = np.exp(-0.5 * ((logT[:, None] - centers[None, :]) / width) ** 2)
     T_RESP += np.float32(1e-30)  # numerical floor
 
     # DEM bin edges in linear T (Kelvin): length = nt + 1
     TEMPS = np.logspace(logT_min, logT_max, int(nt) + 1, dtype=np.float32)
 
     return T_RESP.astype(np.float32, copy=False), logT, TEMPS
+
+
+def build_binned_responses(
+    nt: int,
+    nf: int,
+    *,
+    n_tresp: int = 200,
+    logT_min: float = 5.5,
+    logT_max: float = 7.5,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Construct a response matrix on DEM bins by bin-averaging synthetic responses.
+
+    Returns
+    -------
+    rmatrix : (nt, nf) float64
+        Response per DEM bin and filter (averaged over logT within bin).
+    logt : (nt,) float64
+        Bin-center log10(T) values.
+    dlogt : (nt,) float64
+        Bin widths in log10(T).
+    """
+    T_RESP, logT_samples, TEMPS = prepare_synthetic_responses(
+        logT_min=logT_min, logT_max=logT_max, n_tresp=n_tresp, nt=nt, nf=nf
+    )
+    # Edges in log10(T)
+    log_edges = np.log10(TEMPS.astype(np.float64))
+    # Centers and widths
+    logt = 0.5 * (log_edges[:-1] + log_edges[1:])
+    dlogt = log_edges[1:] - log_edges[:-1]
+
+    # Bin-average T_RESP over logT_samples
+    rmatrix = np.empty((nt, nf), dtype=np.float64)
+    for i in range(nt):
+        lo, hi = log_edges[i], log_edges[i + 1]
+        sel = (logT_samples >= lo) & (
+            logT_samples < hi if i < nt - 1 else logT_samples <= hi
+        )
+        if np.any(sel):
+            rmatrix[i, :] = T_RESP[sel, :].mean(axis=0)
+        else:
+            # Fallback: interpolate each column at center
+            lc = logt[i]
+            for k in range(nf):
+                rmatrix[i, k] = np.interp(lc, logT_samples, T_RESP[:, k])
+
+    # Ensure strictly positive floor to avoid divide-by-zero downstream
+    rmatrix = np.maximum(rmatrix, 1e-30)
+    return (
+        rmatrix.astype(np.float64, copy=False),
+        logt.astype(np.float64),
+        dlogt.astype(np.float64),
+    )
