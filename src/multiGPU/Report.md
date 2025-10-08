@@ -147,7 +147,13 @@ Time in seconds per image. Even though this is the never version rather than the
 The measurements show that the new memory‑handling logic has a lower average wall time per image than the old implementation. The t‑test yields a p‑value of $$3.671\mathrm{e}{-08}$$, which is far below the significance level of 0.05, leading to rejection of the null hypothesis. This indicates a statistically significant difference in wall time between the two implementations, with the new memory‑handling logic being faster.
 
 ## Wrapup and Restoring Vendor Parity
-This lead to great results. So to finalize and check my result I read a bit into the Science behind the Differential Emission measure (DEM) and found that results are expected to be somewhere between 10^20 and 10^26. However My results were somwhere in the Range of 10^80.
+After the performance work, a final sanity check against the additional sources revealed a implementation issue: my runs produced DEMs around 10^80. I found the root cause was an ill‑conditioned response matrix. So far the script was using a trivial, all‑ones response (K) as tresp, which makes the inversion nearly singular; the discrepancy principle then picked very small λ and amplified noise into astronomically large DEM values. 
+To fix this, I replaced the all‑ones K with realistic, well‑behaved synthetic responses and bin‑average them onto the DEM grid (logt, dlogt) so the solver sees an (nt × nf) matrix consistent with the baseline/Vendor pipeline and I added an $$lambda$$ floor to avoid extreme values.
+Additionally I wired in an dn2dem_pos wrapper and organized my code to match the vendor structure more closely and will be easier to read.
+
+## Overlapping Transfers and Compute
+To reduce the total runtime, I then implemented Overlapping Transfers and compute as much as possible. While the main script is saving the data, the next image is already being loaded and processed in the Background.
+While this yields no compute time savings, it helps keep the GPU fed with work.
 
 ## Summary
 
