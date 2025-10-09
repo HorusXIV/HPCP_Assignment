@@ -114,6 +114,8 @@ By contrast, refactoring the implementation to use CuPy exclusively for both com
 
 ## multiGPU Setup
 
+In this Section I will describe the multiGPU implementation and the steps taken to improve the performance of the code. All experiments were run on the FHNW Slurm Cluster. Statistical Tests can be found in the Notebook [Stats4Report.ipynb](Notebooks/Stats4Report.ipynb).
+
 ### Baseline and First Principles
 
 I began with the baseline NumPy implementation that was provided. As a first step, I replaced NumPy with CuPy and vectorized the hot paths to eliminate as many Python loops as possible. This converted the code from being loop‑bound to being GPU‑friendly. However, when I ran it on SLURM, GPU utilization was only around 14%, and overall it was even slower than the CPU version by a huge margin (9+ hours per image).
@@ -200,9 +202,9 @@ The measurements show that the triple‑buffering implementation has a lower ave
 
 ### Improving Memory Stability
 
-This was encouraging, but there was still a problem: out‑of‑memory (OOM) errors occurred frequently, especially with larger images or higher μ‑grid points. Each OOM triggered a retry with a smaller batch (reducing the batch size by half each time), but this wasted time and hurt throughput.
+This was encouraging, but there was still a problem: out‑of‑memory (OOM) errors occurred frequently, especially with larger images or higher $$\mu$$‑grid points. Each OOM triggered a retry with a smaller batch (reducing the batch size by half each time), but this wasted time and hurt throughput.
 
-There were multiple approaches to improve this (for example, statically reducing the number of μ‑grid points), but I wanted to keep vendor parity as high as possible. So I focused on improving the memory‑handling logic. Previously, after each OOM, the batch size was simply halved. The new approach is more robust: flush reclaimable pool blocks before sizing so the estimate reflects real free memory; set the target fraction of free memory to 0.7 by default (tunable via the `MULTIGPU_BATCH_MEM_FRAC` environment variable) to leave headroom for library overhead.
+There were multiple approaches to improve this (for example, statically reducing the number of $$\mu$$-grid points), but I wanted to keep vendor parity as high as possible. So I focused on improving the memory‑handling logic. Previously, after each OOM, the batch size was simply halved. The new approach is more robust: flush reclaimable pool blocks before sizing so the estimate reflects real free memory; set the target fraction of free memory to 0.7 by default (tunable via the `MULTIGPU_BATCH_MEM_FRAC` environment variable) to leave headroom for library overhead.
 
 
 ### Experiment 2: Memory‑Handling Logic
@@ -299,8 +301,8 @@ While the CuPy rewrite significantly improved runtime, it came with trade-offs i
 
 ## multiGPU
 
-With the implemented improvements, the final compute time per image averaged 24.58 ± 1.46 seconds. At this point, I reached diminishing returns: GPU utilization during compute time is now around 90–100% (per `nvidia-smi`), and the timeline shows a steady stream of kernels with brief gaps for saving/loading data.
-Occasional OOMs still happen but are much rarer and GPU‑dependent. The adaptive batch sizing keeps memory usage high without frequent retries (at most 1× per image). Further improvements would likely require more complex changes, such as topology‑aware scheduling or algorithmic modifications. Given time constraints and the learning goals achieved, I did not pursue these further optimizations.
+With the implemented improvements, the final compute time per image averaged 28.99 ± 1.74 seconds with 18.694 ± 0.677 seconds for GPU compute. At this point, I reached diminishing returns: GPU utilization during compute time is now around 90–100% (per `nvidia-smi`), and the timeline shows a steady stream of kernels with brief gaps for saving/loading data.
+Occasional OOMs still happen but normally only once per image to get a good estimator for later batches. The adaptive batch sizing keeps memory usage high without frequent retries. Further improvements would likely require more complex changes, such as topology‑aware scheduling or algorithmic modifications. Given time constraints and the learning goals achieved, I did not pursue these further optimizations.
 
 I also noticed strong dependence on the server/node. For example, running the final version on Server0092 with 4× NVIDIA RTX 2080 Ti was almost 4 seconds slower per image than on Server0101 with 4× NVIDIA RTX 3080 Ti. This variability complicates judging whether an observed improvement is real or noise, especially for effects in the 2–4 second range, which motivated the statistical testing above.
 
