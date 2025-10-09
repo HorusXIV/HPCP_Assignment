@@ -36,7 +36,7 @@ def gpu_ready() -> bool:
 # ---------- responses + small helpers ----------
 def _synth_responses(nt: int, nf: int = 6):
     """Return (T_RESP (nt,nf), logT_centers (nt,), temps(nt+1,))"""
-    logT = np.linspace(5.5, 7.5, 200, dtype=np.float32)
+    logT = np.linspace(5.5, 7.5, nt, dtype=np.float32)
     temps = np.logspace(5.5, 7.5, nt + 1, dtype=np.float32)
     centers = np.linspace(5.7, 7.3, nf, dtype=np.float32)
     T_RESP = np.exp(-0.5 * ((logT[:, None] - centers[None, :]) / 0.20) ** 2) + 1e-30
@@ -83,12 +83,14 @@ def _gpu_batch_dem_matmul(counts_flat: np.ndarray, T_RESP: np.ndarray, nt: int, 
       - upload chunk to device, compute chunk @ T_RESP.T -> dem_chunk
       - compute edem_chunk as small fraction of dem (placeholder)
       - copy back to host and assemble
+    Added: debug logging for each chunk and a CPU fallback if GPU produces invalid output.
     """
     import cupy as cp
 
     pixels, nf = counts_flat.shape
     # use device to hold T_RESP.T = (nf, nt)
-    rmatrix_T = cp.asarray(T_RESP.T, dtype=cp.float32)  # (nf, nt)
+    # ensure correct dtype on device
+    rmatrix_T = cp.asarray(T_RESP.T.astype(np.float32), dtype=cp.float32)  # (nf, nt)
     NT = int(nt)
 
     free_bytes = _get_gpu_free_bytes(cp)
@@ -100,34 +102,87 @@ def _gpu_batch_dem_matmul(counts_flat: np.ndarray, T_RESP: np.ndarray, nt: int, 
     edem_out = np.empty((pixels, NT), dtype=np.float32)
 
     pos = 0
+    chunk_idx = 0
     # Simple single-threaded loop; could be enhanced with streams + pinned memory.
     while pos < pixels:
         end = min(pixels, pos + chunk_pixels)
         sub = counts_flat[pos:end].astype(np.float32, copy=False)  # (chunk, nf)
 
-        # device compute
-        d_sub = cp.asarray(sub)  # copy to device
-        # matrix multiply: (chunk, nf) @ (nf, nt) -> (chunk, nt)
-        d_dem = cp.matmul(d_sub, rmatrix_T)
-        # placeholder error model: relative fraction of dem; replace with proper model if known
-        d_edem = 0.1 * cp.abs(d_dem)
+        # Quick host-side stats for input chunk
+        try:
+            sub_min, sub_max, sub_mean = float(sub.min()), float(sub.max()), float(sub.mean())
+        except Exception:
+            sub_min, sub_max, sub_mean = None, None, None
+        print(f"[DEBUG gpu] chunk {chunk_idx}: pixels={end-pos} input min={sub_min} max={sub_max} mean={sub_mean}")
 
-        # copy back
-        dem_out[pos:end, :] = cp.asnumpy(d_dem)
-        edem_out[pos:end, :] = cp.asnumpy(d_edem)
+        # device compute
+        try:
+            d_sub = cp.asarray(sub)  # copy to device
+            # matrix multiply: (chunk, nf) @ (nf, nt) -> (chunk, nt)
+            d_dem = cp.matmul(d_sub, rmatrix_T)
+            # placeholder error model: relative fraction of dem; replace with proper model if known
+            d_edem = 0.1 * cp.abs(d_dem)
+
+            # copy back
+            dem_chunk = cp.asnumpy(d_dem)
+            edem_chunk = cp.asnumpy(d_edem)
+        except Exception as e:
+            # GPU chunk-level failure — log and fallback to CPU for this chunk
+            print(f"[WARN gpu] chunk {chunk_idx} GPU compute failed: {e}; falling back to CPU matmul for this chunk")
+            dem_chunk = sub @ T_RESP.T.astype(np.float32)
+            edem_chunk = 0.1 * np.abs(dem_chunk)
+
+        # Basic validation of chunk output
+        bad_chunk = False
+        try:
+            if not dem_chunk.size:
+                bad_chunk = True
+            elif np.isnan(dem_chunk).any():
+                bad_chunk = True
+            elif np.allclose(dem_chunk, 0.0):
+                # all-zero chunk; mark as suspicious
+                bad_chunk = True
+        except Exception:
+            bad_chunk = True
+
+        if bad_chunk:
+            print(f"[WARN gpu] chunk {chunk_idx} produced invalid/zero DEM (min={dem_chunk.min() if dem_chunk.size else 'NA'}, "
+                  f"max={dem_chunk.max() if dem_chunk.size else 'NA'}). Using CPU matmul for this chunk.")
+            dem_chunk = sub @ T_RESP.T.astype(np.float32)
+            edem_chunk = 0.1 * np.abs(dem_chunk)
+
+        # assign into outputs
+        dem_out[pos:end, :] = dem_chunk.astype(np.float32, copy=False)
+        edem_out[pos:end, :] = edem_chunk.astype(np.float32, copy=False)
 
         # free device temp memory ASAP
-        del d_sub, d_dem, d_edem
-        cp.get_default_memory_pool().free_all_blocks()
+        try:
+            del d_sub, d_dem, d_edem
+            cp.get_default_memory_pool().free_all_blocks()
+        except Exception:
+            pass
 
         pos = end
+        chunk_idx += 1
 
     # cleanup
-    del rmatrix_T
-    cp.get_default_memory_pool().free_all_blocks()
-    cp.cuda.Stream.null.synchronize()
-
+    try:
+        del rmatrix_T
+        cp.get_default_memory_pool().free_all_blocks()
+        cp.cuda.Stream.null.synchronize()
+    except Exception:
+        pass
+    try:
+        print(
+            f"[DEBUG _gpu_batch_dem_matmul] dem_out shape={dem_out.shape} min={dem_out.min():.6g} max={dem_out.max():.6g} mean={dem_out.mean():.6g}",
+            flush=True)
+        print(
+            f"[DEBUG _gpu_batch_dem_matmul] edem_out shape={edem_out.shape} min={edem_out.min():.6g} max={edem_out.max():.6g} mean={edem_out.mean():.6g}",
+            flush=True)
+    except Exception as e:
+        print(f"[DEBUG _gpu_batch_dem_matmul] stats failed: {e}", flush=True)
     return dem_out.astype(np.float32, copy=False), edem_out.astype(np.float32, copy=False)
+
 
 
 def _gpu_batch_err_sqrt(counts_flat: np.ndarray, a: float, b: float) -> np.ndarray:
@@ -254,9 +309,17 @@ def solve_tile_all_single_gpu(
                 dem1d, edem1d = _gpu_batch_dem_matmul(counts_flat, T_RESP, NT, cupy_streams=max(1, int(streams)))
                 # naive chisq fallback: zeros (vendor typically supplies chisq)
                 chisq1d = np.zeros((pixels_total,), dtype=np.float32)
-            except Exception:
+                try:
+                    print(
+                        f"[DEBUG gpu] dem1d shape={getattr(dem1d, 'shape', None)} min={dem1d.min():.6g} max={dem1d.max():.6g} mean={dem1d.mean():.6g}")
+                    print(
+                        f"[DEBUG gpu] edem1d shape={getattr(edem1d, 'shape', None)} min={edem1d.min():.6g} max={edem1d.max():.6g} mean={edem1d.mean():.6g}")
+                except Exception as _:
+                    print("[DEBUG gpu] could not compute dem1d/edem1d stats (maybe None or malformed)")
+            except Exception as e:
                 # last resort: CPU solver per-frame/per-tile
                 dem1d = None
+                print(f"[DEBUG _gpu_batch_dem_matmul] stats failed: {e}", flush=True)
         else:
             dem1d = None
 
@@ -276,30 +339,28 @@ def solve_tile_all_single_gpu(
                 return dem_out[0], edem_out[0], chisq_out[0], logT_centers.astype(np.float32, copy=False)
             return dem_out, edem_out, chisq_out, logT_centers.astype(np.float32, copy=False)
 
+
     # At this point dem1d/edem1d/chisq1d are available (shape: (pixels, k))
     dem1d = np.asarray(dem1d, dtype=np.float32, copy=False)
     edem1d = np.asarray(edem1d, dtype=np.float32, copy=False)
     chisq1d = np.asarray(chisq1d, dtype=np.float32, copy=False)
-
+    print(
+        f"[DEBUG solve] dem1d stats right after GPU/CPU path: shape={dem1d.shape}, min={dem1d.min():.3g}, max={dem1d.max():.3g}, mean={dem1d.mean():.3g}")
+    print(f"[DEBUG solve] T_RESP_LOGT len={len(T_RESP_LOGT)}, NT={NT}")
     # If vendor returned a different NT, resample/interp as before
     if dem1d.ndim == 2 and dem1d.shape[1] != NT:
-        src_len = int(dem1d.shape[1])
-        if src_len == int(T_RESP_LOGT.shape[0]):
-            DEM_nt = np.empty((dem1d.shape[0], NT), dtype=np.float32)
-            EDEM_nt = np.empty_like(DEM_nt)
-            for i in range(dem1d.shape[0]):
-                DEM_nt[i, :] = np.interp(logT_centers, T_RESP_LOGT, dem1d[i, :]).astype(np.float32, copy=False)
-                EDEM_nt[i, :] = np.interp(logT_centers, T_RESP_LOGT, edem1d[i, :]).astype(np.float32, copy=False)
-            dem1d = DEM_nt
-            edem1d = EDEM_nt
-        else:
-            m = min(src_len, NT)
-            DEM_nt = np.zeros((dem1d.shape[0], NT), dtype=np.float32)
-            EDEM_nt = np.zeros_like(DEM_nt)
-            DEM_nt[:, :m] = dem1d[:, :m]
-            EDEM_nt[:, :m] = edem1d[:, :m]
-            dem1d = DEM_nt
-            edem1d = EDEM_nt
+        src_len = dem1d.shape[1]
+        dem_resampled = np.empty((dem1d.shape[0], NT), dtype=np.float32)
+        edem_resampled = np.empty_like(dem_resampled)
+
+        # interpolate along the second axis
+        for i in range(dem1d.shape[0]):
+            dem_resampled[i, :] = np.interp(logT_centers, T_RESP_LOGT[:src_len], dem1d[i, :src_len]).astype(np.float32)
+            edem_resampled[i, :] = np.interp(logT_centers, T_RESP_LOGT[:src_len], edem1d[i, :src_len]).astype(
+                np.float32)
+
+        dem1d = dem_resampled
+        edem1d = edem_resampled
 
     # reshape back to (F,H,W,NT) and (F,H,W) for chisq
     dem = dem1d.reshape((F, H, W, NT)).astype(np.float32, copy=False)

@@ -197,6 +197,10 @@ def run_benchmark_single_gpu(
 
     # Load frames
     stack = np.stack([_load_frame_hw6(Path(files[i])) for i in frame_idx], axis=0)
+    min_val = stack.min()
+    if min_val < 0.0:
+        print(f"[INFO] Shifting all frames by {-min_val:.3f} to remove negative counts")
+        stack -= min_val  # shift so minimum is zero
     F = int(stack.shape[0])
 
     log = logging.getLogger(__name__)
@@ -222,28 +226,90 @@ def run_benchmark_single_gpu(
         for fi in range(F):
             frame_t0 = time.perf_counter()
             frame = stack[fi]
+            # DEBUG: Check input frame stats
+            print(f"[DEBUG] Frame {fi} input min/max per band:")
+            for b in range(frame.shape[2]):
+                print(f"  Band {b}: min={frame[:, :, b].min()}, max={frame[:, :, b].max()}")
 
             # Split frame into tiles
             tile_coords = []
-            tiles_batch = []
+            tiles = []
+
             for i0 in range(0, H, Th):
                 for j0 in range(0, W, Tw):
                     i1 = min(i0 + Th, H)
                     j1 = min(j0 + Tw, W)
                     tile_coords.append((i0, i1, j0, j1))
-                    tiles_batch.append(frame[i0:i1, j0:j1, :])
-            tiles_batch = np.stack(tiles_batch, axis=0)  # (num_tiles, Th, Tw, 6)
+                    tiles.append(frame[i0:i1, j0:j1, :])
 
-            try:
-                _free_gpu_memory()
-                dem_tiles, edem_tiles, chisq_tiles, _ = solve_tile_all_single_gpu(tiles_batch, nmu=nmu)
-            except Exception as e:
-                log.error("[singleGPU] frame %d GPU failed: %s, falling back to CPU", fi, str(e))
-                from src.common.solver import solve_tile_all as _solve_cpu
-                dem_tiles, edem_tiles, chisq_tiles, _ = _solve_cpu(frame, nmu=nmu, nt=NT)
-                dem_tiles = dem_tiles.reshape((len(tile_coords), Th, Tw, NT))
-                edem_tiles = edem_tiles.reshape((len(tile_coords), Th, Tw, NT))
-                chisq_tiles = chisq_tiles.reshape((len(tile_coords), Th, Tw))
+            num_tiles = len(tiles)
+            log.info("[singleGPU] frame %d: %d tiles to process (%dx%d each)", fi, num_tiles, Th, Tw)
+
+            # number of tiles to process per GPU call — keep small to avoid OOM
+            tiles_per_call = int(os.environ.get("TILES_PER_CALL", "2"))
+            log.info("[singleGPU] using tiles_per_call=%d", tiles_per_call)
+
+            dem_tiles_list = []
+            edem_tiles_list = []
+            chisq_tiles_list = []
+
+
+            for start in range(0, num_tiles, tiles_per_call):
+                end = min(num_tiles, start + tiles_per_call)
+                sub_tiles = tiles[start:end]
+                sub_batch = np.stack(sub_tiles, axis=0)
+
+                log.debug("[singleGPU] processing tiles %d-%d (batch shape=%s)", start, end - 1, sub_batch.shape)
+
+
+                try:
+                    dem_sub, edem_sub, chisq_sub, _ = solve_tile_all_single_gpu(sub_batch, nmu=nmu)
+                    log.debug(
+                        "[singleGPU] dem_sub stats: shape=%s min=%.3g max=%.3g mean=%.3g",
+                        dem_sub.shape, float(dem_sub.min()), float(dem_sub.max()), float(dem_sub.mean()),
+                    )
+                except Exception as ex:
+                    log.error("[singleGPU] tiles %d-%d GPU/solver failed: %s — falling back to CPU", start,
+                                end - 1, str(ex))
+
+                    from src.common.solver import solve_tile_all as _solve_cpu
+                    dem_sub_list = []
+                    edem_sub_list = []
+                    chisq_sub_list = []
+                    for t_idx, t in enumerate(sub_tiles):
+                        try:
+                            dem_f, edem_f, chisq_f, _ = _solve_cpu(t, nmu=nmu, nt=NT)
+                            dem_sub_list.append(dem_f)
+                            edem_sub_list.append(edem_f)
+                            chisq_sub_list.append(chisq_f)
+                        except Exception as cpu_ex:
+                            log.exception("[singleGPU] CPU fallback failed for tile %d: %s", t_idx, str(cpu_ex))
+                            # produce zero output as placeholder
+                            dem_sub_list.append(np.zeros((t.shape[0], t.shape[1], NT), dtype=np.float32))
+                            edem_sub_list.append(np.zeros_like(dem_sub_list[-1]))
+                            chisq_sub_list.append(np.zeros((t.shape[0], t.shape[1]), dtype=np.float32))
+
+                    dem_sub = np.stack(dem_sub_list, axis=0)
+                    edem_sub = np.stack(edem_sub_list, axis=0)
+                    chisq_sub = np.stack(chisq_sub_list, axis=0)
+
+                dem_tiles_list.append(dem_sub)
+                edem_tiles_list.append(edem_sub)
+                chisq_tiles_list.append(chisq_sub)
+
+              # clean GPU memory between batches
+                try:
+                    _free_gpu_memory()
+                except Exception:
+                    pass
+
+            # concatenate all batches
+            dem_tiles = np.concatenate(dem_tiles_list, axis=0)
+            edem_tiles = np.concatenate(edem_tiles_list, axis=0)
+            chisq_tiles = np.concatenate(chisq_tiles_list, axis=0)
+
+            log.info("[singleGPU] frame %d all tiles done: dem min=%.3g max=%.3g mean=%.3g",
+                    fi, float(dem_tiles.min()), float(dem_tiles.max()), float(dem_tiles.mean()))
 
             # Scatter tiles back
             for k, (i0, i1, j0, j1) in enumerate(tile_coords):
@@ -251,6 +317,9 @@ def run_benchmark_single_gpu(
                 edem[fi, i0:i1, j0:j1, :] = edem_tiles[k][:i1-i0, :j1-j0, :]
                 chisq[fi, i0:i1, j0:j1] = chisq_tiles[k][:i1-i0, :j1-j0]
 
+            print(f"[DEBUG] Frame {fi} DEM min/max: {dem[fi].min()}, {dem[fi].max()}")
+            print(f"[DEBUG] Frame {fi} EDEM min/max: {edem[fi].min()}, {edem[fi].max()}")
+            print(f"[DEBUG] Frame {fi} chisq min/max: {chisq[fi].min()}, {chisq[fi].max()}")
             frame_dt = time.perf_counter() - frame_t0
             tiles_per_frame = len(tile_coords)
             ms_per_tile = frame_dt / tiles_per_frame * 1e3
@@ -259,14 +328,15 @@ def run_benchmark_single_gpu(
                      fi, frame_dt, tiles_per_frame, ms_per_tile,
                      f"{util['gpu']}% mem={util['mem']}%" if util else "unknown")
 
-            _free_gpu_memory()  # clear memory after frame
+             # clear memory after frame
 
-        prof.section("compute", start=False)
+            prof.section("compute", start=False)
 
-    outputs_path = bench_dir / f"outputs_{stamp}.npz"
-    np.savez_compressed(outputs_path, dem=dem, edem=edem, chisq=chisq)
+            outputs_path = bench_dir / f"outputs_{stamp}_{fi}.npz"
+            np.savez_compressed(outputs_path, dem=dem, edem=edem, chisq=chisq)
+            _free_gpu_memory()
 
-    # Reporting
+            # Reporting
     verify_ok = bool(verify)
     reports: List[str] = []
     if verify and golden_root:
