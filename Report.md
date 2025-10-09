@@ -118,7 +118,7 @@ In this Section I will describe the multiGPU implementation and the steps taken 
 
 ### Baseline and First Principles
 
-I began with the baseline NumPy implementation that was provided. As a first step, I replaced NumPy with CuPy and vectorized the hot paths to eliminate as many Python loops as possible. This converted the code from being loop‑bound to being GPU‑friendly. However, when I ran it on SLURM, GPU utilization was only around 14%, and overall it was even slower than the CPU version by a huge margin (9+ hours per image).
+I began with the baseline NumPy implementation that was provided. As a first step, I replaced NumPy with CuPy and vectorized the hot paths to eliminate as many Python loops as possible. This converted the code to being GPU‑friendly. However, when I ran it on SLURM, GPU utilization was only around 14%, and overall it was even slower than the CPU version by a huge margin (9+ hours per image).
 
 To run on the cluster, I created a Singularity container. This took significant time due to numerous dependencies and limited prior experience with Singularity. After matching CuPy and CUDA versions and installing additional libraries to avoid compilation errors, I was able to run the code on the cluster.
 
@@ -221,7 +221,7 @@ We define the significance level α = 0.05.
 
 #### Measurements
 
-Time in seconds per image. Even though this is the never version rather than the last test, I didn't fix the batch size, which led to a higher processing time per Image. Additionally, you can see that some servers take much longer than others.
+Time in seconds per image. Even though this is the never version compared t the last test, I didn't fix the batch size, which led to a higher processing time per Image. Additionally, you can see that some servers take much longer than others.
 
 |  # | Old Version |    New Version |
 | -: | ----------: | -------------: |
