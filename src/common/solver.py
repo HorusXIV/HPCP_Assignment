@@ -1,6 +1,8 @@
 # src/common/solver.py
 from __future__ import annotations
 """
+LEGACY CODE (used as a fallback in the single-gpu approach)
+
 Unified CPU-side solver utilities.
 
 This module provides a small, stable surface that the rest of the project can

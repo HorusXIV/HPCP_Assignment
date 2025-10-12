@@ -1,62 +1,121 @@
 #!/bin/bash -l
-#SBATCH -p performance
-#SBATCH -t 04:00:00
-#SBATCH --job-name=HPCP_Baseline
-#SBATCH --mem=16G
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-# #SBATCH --gres=gpu:1   # uncomment if you want a GPU available to the container
+#SBATCH --partition=performance
+#SBATCH --time=02:00:00
+#SBATCH --job-name=baseline_4096
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=80G
+#SBATCH --output=logs/baseline_4096_%j.out
+#SBATCH --error=logs/baseline_4096_%j.err
 
 set -euo pipefail
 
-# ---------------- Config via env (optional) ----------------
+# ============================================================
+# Baseline DEM Benchmark - Size 512, 3 Repeats
+# ============================================================
+
+# Configuration
 REPO_DIR="${REPO_DIR:-$SLURM_SUBMIT_DIR}"
 IMAGE="${IMAGE:-$REPO_DIR/containers/python_poetry.sif}"
-
-# Python entrypoint (module path)
 ENTRY="${ENTRY:-src.baseline.main}"
 
-# CLI args to your baseline runner (tweak as needed)
-# --idx -1 == process *all* stacks (your codebase now treats -1 as 'all')
-ARGS="${ARGS:---sizes 14,64,256,1024 --idx -1 --repeats 3 --nmu 42}"
+# Benchmark parameters
+DATA_DIR="${DATA_DIR:-data/np32}"
+IDX="${IDX:-0}"         # Which frame: "0", "1", "all", etc.
+SIZES="4096"
+REPEATS="3"
+NMU="42"
 
-# Poetry/cache knobs
-export POETRY_VIRTUALENVS_IN_PROJECT=1
-export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$REPO_DIR/.cache/pip}"
-export POETRY_CACHE_DIR="${POETRY_CACHE_DIR:-$REPO_DIR/.cache/pypoetry}"
-
-# Math threading (pin BLAS/OpenMP to SLURM allocation)
-export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}
-export MKL_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}
-export OPENBLAS_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}
-export NUMEXPR_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}
+# Threading - use all allocated CPUs for baseline
+export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-16}
+export MKL_NUM_THREADS=${SLURM_CPUS_PER_TASK:-16}
+export OPENBLAS_NUM_THREADS=${SLURM_CPUS_PER_TASK:-16}
+export NUMEXPR_NUM_THREADS=${SLURM_CPUS_PER_TASK:-16}
 export PYTHONUNBUFFERED=1
 
-echo "[SLURM] Repo dir : $REPO_DIR"
-echo "[SLURM] Image    : $IMAGE"
-echo "[SLURM] Entry    : $ENTRY"
-echo "[SLURM] Args     : $ARGS"
-echo "[SLURM] CPUS     : ${SLURM_CPUS_PER_TASK:-NA}"
+# Poetry cache
+export POETRY_VIRTUALENVS_IN_PROJECT=1
+export POETRY_VIRTUALENVS_PATH="/workspace/.venv"
+export PIP_CACHE_DIR="/workspace/.cache/pip"
+export POETRY_CACHE_DIR="/workspace/.cache/pypoetry"
 
-# Prefer apptainer if present, else singularity
-RUNCTL="$(command -v apptainer || true)"
-if [[ -z "$RUNCTL" ]]; then
-  RUNCTL="$(command -v singularity)"
+# Create logs directory
+mkdir -p "${REPO_DIR}/logs"
+mkdir -p "${REPO_DIR}/benchmark_out/baseline"
+
+echo "============================================================"
+echo "Baseline DEM Benchmark - Size 512x512"
+echo "============================================================"
+echo "Job ID      : ${SLURM_JOB_ID}"
+echo "Node        : ${SLURMD_NODENAME}"
+echo "CPUs        : ${SLURM_CPUS_PER_TASK}"
+echo "Memory      : 32GB"
+echo "Container   : ${IMAGE}"
+echo "Work dir    : ${REPO_DIR}"
+echo ""
+echo "Benchmark Configuration:"
+echo "  Data dir  : ${DATA_DIR}"
+echo "  Frame     : ${IDX}"
+echo "  Size      : ${SIZES}x${SIZES}"
+echo "  Repeats   : ${REPEATS}"
+echo "  NMU       : ${NMU}"
+echo "============================================================"
+echo ""
+
+# Verify container exists
+if [[ ! -f "${IMAGE}" ]]; then
+    echo "ERROR: Container not found: ${IMAGE}"
+    exit 1
 fi
 
-"$RUNCTL" exec --cleanenv \
-  --bind "$REPO_DIR":/workspace \
-  "$IMAGE" bash -lc "
-    set -euo pipefail
-    cd /workspace
+# Install dependencies (once)
+echo "[INFO] Installing dependencies..."
+singularity exec --cleanenv \
+    --bind "${REPO_DIR}:/workspace" \
+    "${IMAGE}" \
+    bash -lc "
+        set -euo pipefail
+        cd /workspace
+        poetry install --no-interaction --no-ansi
+    "
 
-    # Optional: fail fast if vendor fast path is required
-    # export HPCP_REQUIRE_VENDOR=\${HPCP_REQUIRE_VENDOR:-0}
+echo ""
+echo "[INFO] Running baseline benchmark..."
+echo ""
 
-    # Install deps (cached into /workspace/.venv)
-    poetry --version
-    poetry install --no-interaction --no-ansi
+# Run baseline benchmark
+singularity exec --cleanenv \
+    --bind "${REPO_DIR}:/workspace" \
+    "${IMAGE}" \
+    bash -lc "
+        set -euo pipefail
+        cd /workspace
+        poetry run python -m ${ENTRY} \
+            --data-dir ${DATA_DIR} \
+            --idx ${IDX} \
+            --sizes ${SIZES} \
+            --repeats ${REPEATS} \
+            --nmu ${NMU} \
+            --outdir benchmarking/baseline \
+            --save-benchmark first
+    "
 
-    echo '[RUN] poetry run python -m $ENTRY $ARGS'
-    poetry run python -m \"$ENTRY\" $ARGS
-"
+EXIT_CODE=$?
+
+if [[ $EXIT_CODE -ne 0 ]]; then
+    echo ""
+    echo "ERROR: Baseline benchmark failed with exit code $EXIT_CODE"
+    exit $EXIT_CODE
+fi
+
+echo ""
+echo "============================================================"
+echo "Benchmark Complete!"
+echo "============================================================"
+echo "Results:"
+echo "  CSV:      benchmark_out/baseline/wallclock/wallclock.csv"
+echo "  Markdown: benchmark_out/baseline/wallclock/wallclock.md"
+echo "  NPZ:      data/output/baseline/ (first repeat)"
+echo ""
+echo "To view results:"
+echo "  cat benchmark_out/baseline/wallclock/wallclock.md"
+echo "============================================================"

@@ -1,14 +1,27 @@
 # src/common/verification/__init__.py
-from .goldens import write_goldens as write_goldens
-from .verify import compare_to_golden as compare_to_golden
-from .check import (
-    verify_against_golden as verify_against_golden,
-    verify_dataset_to_json as verify_dataset_to_json,
+"""
+Verification utilities for comparing DEM results against golden references.
+
+This module provides solver-agnostic comparison functions. Golden generation
+is handled by each backend (baseline, GPU, Dask) individually.
+
+Public API
+----------
+compare_to_golden : Compare computed arrays to a golden NPZ
+ComparisonResult : Dataclass holding comparison details
+load_golden : Load golden reference from NPZ
+"""
+
+from .compare import (
+    compare_to_golden,
+    ComparisonResult,
+    load_golden,
+    save_golden,
 )
 
 __all__ = [
-    "write_goldens",
     "compare_to_golden",
-    "verify_against_golden",
-    "verify_dataset_to_json",
+    "ComparisonResult",
+    "load_golden",
+    "save_golden",
 ]

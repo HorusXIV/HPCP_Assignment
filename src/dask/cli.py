@@ -125,7 +125,7 @@ def get_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Use threads for workers.",
     )
-    p.set_defaults(processes=False)
+    p.set_defaults(processes=True)
 
     # Optional: address/port for attaching to an existing scheduler
     c.add_argument(
@@ -153,8 +153,8 @@ def parse_args(argv: Optional[List[str]] = None):
     args = get_parser().parse_args(argv)
 
     # Normalize size/tile strings to tuples
-    args.sizes = _parse_hw(args.sizes)
-    args.tile = _parse_hw(args.tile)
+    # args.sizes = _parse_hw(args.sizes)
+    # args.tile = _parse_hw(args.tile)
 
     # Clean up address/port when provided as empty or literal "None"
     if getattr(args, "scheduler_address", None) in ("", "None"):

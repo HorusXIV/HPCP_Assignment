@@ -1,0 +1,32 @@
+{
+  "platform": {
+    "system": "Linux",
+    "release": "6.8.0-84-generic",
+    "version": "#84-Ubuntu SMP PREEMPT_DYNAMIC Fri Sep  5 22:36:38 UTC 2025",
+    "python": "3.12.8",
+    "machine": "x86_64",
+    "processor": "x86_64"
+  },
+  "env_caps": {
+    "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1"
+  },
+  "versions": {
+    "python": "3.12.8",
+    "numpy": "2.2.6",
+    "scipy": "1.16.2",
+    "dask": "2025.9.1",
+    "distributed": "2025.9.1",
+    "numba": "0.61.2",
+    "cupy": "13.6.0"
+  },
+  "cpu": {
+    "count_logical": 32,
+    "count_physical": 16
+  },
+  "memory": {
+    "total_bytes": 134892691456
+  }
+}

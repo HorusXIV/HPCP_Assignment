@@ -1,6 +1,3 @@
-import numpy as np
-from numpy.linalg import inv,pinv,svd
-
 # DEMREG/python/dem_inv_gsvd.py
 
 import numpy as np

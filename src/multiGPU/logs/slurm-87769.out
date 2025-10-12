@@ -1,0 +1,30 @@
+[OPT][87769] Job on nodes: server0092
+[OPT][87769] MPI tasks: 4  GPUs/task: 1  CPUs/task: 3
+[OPT][87769] GPU inventory:
+index, name, memory.total [MiB], pci.bus_id
+0, NVIDIA GeForce RTX 2080 Ti, 11264 MiB, 00000000:21:00.0
+1, NVIDIA GeForce RTX 2080 Ti, 11264 MiB, 00000000:22:00.0
+2, NVIDIA GeForce RTX 2080 Ti, 11264 MiB, 00000000:42:00.0
+3, NVIDIA GeForce RTX 2080 Ti, 11264 MiB, 00000000:61:00.0
+[OPT][87769] GPU topology for large image processing optimization:
+	[4mGPU0	GPU1	GPU2	GPU3	CPU Affinity	NUMA Affinity	GPU NUMA ID[0m
+GPU0	 X 	PHB	SYS	SYS	8-11,40-43	1		N/A
+GPU1	PHB	 X 	SYS	SYS	8-11,40-43	1		N/A
+GPU2	SYS	SYS	 X 	SYS			N/A		N/A
+GPU3	SYS	SYS	SYS	 X 		3		N/A
+
+Legend:
+
+  X    = Self
+  SYS  = Connection traversing PCIe as well as the SMP interconnect between NUMA nodes (e.g., QPI/UPI)
+  NODE = Connection traversing PCIe as well as the interconnect between PCIe Host Bridges within a NUMA node
+  PHB  = Connection traversing PCIe as well as a PCIe Host Bridge (typically the CPU)
+  PXB  = Connection traversing multiple PCIe bridges (without traversing the PCIe Host Bridge)
+  PIX  = Connection traversing at most a single PCIe bridge
+  NV#  = Connection traversing a bonded set of # NVLinks
+Installing dependencies from lock file
+
+No dependencies to install or update
+
+Installing the current project: hpcp-assignment (0.1.0)
+[OPT][87769] Config: LOG_LEVEL=WARNING VERBOSE=0 PROFILE=0 NVTX=0 BATCH_SIZE=0

@@ -1,0 +1,2 @@
+timestamp,impl,frame_size_H,frame_size_W,tile,nmu,nt,n_workers,threads_per_worker,compute_seconds,mpixels_per_sec,chisq_mean,job_id,node
+20251012_193021,dask,4096,4096,512,42,25,16,1,974.4056,0.017,75.6942,local,server0096

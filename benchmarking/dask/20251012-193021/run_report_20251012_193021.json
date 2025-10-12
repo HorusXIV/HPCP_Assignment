@@ -1,0 +1,30 @@
+{
+  "stamp": "20251012_193021",
+  "total_seconds": 976.6546585469041,
+  "marks": {},
+  "sections": {
+    "build_graph": 0.0031628659926354885,
+    "compute": 974.405638420023
+  },
+  "gpu_timings": {},
+  "paths": {
+    "perf_html": "benchmarking/dask/performance_report_20251012_193021.html",
+    "tasks_csv": "benchmarking/dask/tasks_20251012_193021.csv",
+    "tasks_agg_csv": "benchmarking/dask/tasks_agg_20251012_193021.csv",
+    "system_timeseries_csv": "benchmarking/dask/system_timeseries_20251012_193021.csv",
+    "env_json": "benchmarking/dask/env_20251012_193021.json"
+  },
+  "env_versions": {
+    "python": "3.12.8",
+    "numpy": "2.2.6",
+    "scipy": "1.16.2",
+    "dask": "2025.9.1",
+    "distributed": "2025.9.1",
+    "numba": "0.61.2",
+    "cupy": "13.6.0"
+  },
+  "worker_snapshots": [
+    "before",
+    "after"
+  ]
+}

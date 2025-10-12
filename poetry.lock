@@ -1139,6 +1139,25 @@ distributed = ["distributed (==2025.9.1)"]
 test = ["pandas[test]", "pre-commit", "pytest", "pytest-cov", "pytest-mock", "pytest-rerunfailures", "pytest-timeout", "pytest-xdist"]
 
 [[package]]
+name = "dask-jobqueue"
+version = "0.9.0"
+description = "Deploy Dask on job queuing systems like PBS, Slurm, SGE or LSF"
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "dask_jobqueue-0.9.0-py2.py3-none-any.whl", hash = "sha256:253dfc4f0b8722201a08e05b841859dfeea1f6698ff21eff0d9370e5aa8ae20f"},
+    {file = "dask_jobqueue-0.9.0.tar.gz", hash = "sha256:494ef64b7bb3848c7d72ed334c288030caca6a09dca54cfaa3f395f4ba7f5c47"},
+]
+
+[package.dependencies]
+dask = ">=2022.02.0"
+distributed = ">=2022.02.0"
+
+[package.extras]
+test = ["cryptography", "pytest", "pytest-asyncio"]
+
+[[package]]
 name = "debugpy"
 version = "1.8.17"
 description = "An implementation of the Debug Adapter Protocol for Python"
@@ -6331,4 +6350,4 @@ files = [
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12"
-content-hash = "5f09b440bd2b80ec1f32b82854d23c30ad2a4eb159326dbb458499bbf6996eb1"
+content-hash = "d930b9775941ad72b8b006be3239b91d67bf752f9425d143503ac6ad64c2c662"

@@ -1,0 +1,26 @@
+{
+  "stamp": "20251012-175341",
+  "total_seconds": 244.12968969997019,
+  "marks": {},
+  "sections": {
+    "compute": 34.83578178379685
+  },
+  "gpu_timings": {},
+  "paths": {
+    "perf_html": null,
+    "tasks_csv": "benchmarking/singlegpu/20251012-175341/tasks_20251012-175341.csv",
+    "tasks_agg_csv": "benchmarking/singlegpu/20251012-175341/tasks_agg_20251012-175341.csv",
+    "system_timeseries_csv": "benchmarking/singlegpu/20251012-175341/system_timeseries_20251012-175341.csv",
+    "env_json": "benchmarking/singlegpu/20251012-175341/env_20251012-175341.json"
+  },
+  "env_versions": {
+    "python": "3.12.8",
+    "numpy": "2.2.6",
+    "scipy": "1.16.2",
+    "dask": "2025.9.1",
+    "distributed": "2025.9.1",
+    "numba": "0.61.2",
+    "cupy": "13.6.0"
+  },
+  "worker_snapshots": []
+}
