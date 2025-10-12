@@ -90,3 +90,24 @@ extend-exclude = [
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "src"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--strict-config",
+]
+filterwarnings = [
+    "error",  # Turn warnings into errors by default
+    # Allow specific expected warnings:
+    "ignore:CUDA path could not be detected:UserWarning",
+    "ignore:Median chi-square is.*high.*Check data quality:UserWarning",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+]
