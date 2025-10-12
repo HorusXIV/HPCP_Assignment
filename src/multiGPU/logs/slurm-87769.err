@@ -1,0 +1,10 @@
+/workspace/.venv/bin/python: No module named src.multiGPU.main
+/workspace/.venv/bin/python: No module named src.multiGPU.main
+/workspace/.venv/bin/python: No module named src.multiGPU.main
+/workspace/.venv/bin/python: No module named src.multiGPU.main
+srun: error: server0092: tasks 0,2: Exited with exit code 1
+srun: Terminating StepId=87769.0
+slurmstepd-server0092: error: *** STEP 87769.0 ON server0092 CANCELLED AT 2025-10-12T18:05:02 ***
+srun: error: server0092: task 1: Terminated
+srun: error: server0092: task 3: Exited with exit code 1
+srun: Force Terminated StepId=87769.0

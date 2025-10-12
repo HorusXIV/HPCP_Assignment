@@ -1,0 +1,8 @@
+The virtual environment found in /workspace/.venv seems to be broken.
+Recreating virtualenv hpcp-assignment in /workspace/.venv
+/workspace/.venv/bin/python: No module named src.multiGPU.main
+/workspace/.venv/bin/python: No module named src.multiGPU.main
+/workspace/.venv/bin/python: No module named src.multiGPU.main
+/workspace/.venv/bin/python: No module named src.multiGPU.main
+srun: error: server0092: tasks 0-3: Exited with exit code 1
+srun: Terminating StepId=87748.0

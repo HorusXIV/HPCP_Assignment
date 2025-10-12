@@ -195,14 +195,15 @@ def dem_pix(dnin,ednin,rmatrix,logt,dlogt,glc,reg_tweak=1.0,max_iter=10,rgt_fact
     rmatrixin=np.zeros([nt,nf])
     filt=np.zeros([nf,nt])  
     
+    eps = 1.0
+    ednin_safe = np.maximum(ednin, eps).astype(float)
     for kk in np.arange(nf):
-        #response matrix
-        rmatrixin[:,kk]=rmatrix[:,kk]/ednin[kk]
-    dn=dnin/ednin
-    edn=ednin/ednin
+        rmatrixin[:, kk] = rmatrix[:, kk] / ednin_safe[kk]
+    dn = dnin / ednin_safe
+    edn = np.ones_like(ednin_safe)  # by construction after whitening
 
     # checking for Inf and NaN
-    if ( sum(np.isnan(dn)) == 0 and sum(np.isinf(dn)) == 0 and np.prod(dn) > 0):
+    if np.all(np.isfinite(dn)) and np.any(dn > 0.0):
         ndem=1
         piter=0
         rgt=reg_tweak
@@ -249,9 +250,9 @@ def dem_pix(dnin,ednin,rmatrix,logt,dlogt,glc,reg_tweak=1.0,max_iter=10,rgt_fact
                 dr0=(kdag@dn).squeeze()
                 # only take the positive with certain amount (fcofmx) of max, then make rest small positive
                 fcofmax=1e-4
-                mask=np.where(dr0 > 0) and (dr0 > fcofmax*np.max(dr0))
-                dem_reg_lwght=np.ones(nt)
-                dem_reg_lwght[mask]=dr0[mask]
+                mask = (dr0 > 0) & (dr0 > fcofmax*np.max(dr0))
+                dem_reg_lwght = np.ones(nt)
+                dem_reg_lwght[mask] = dr0[mask]
 #                ~~~~~~~~~~~~~~~~~ 
 #            Just smooth these inital dem_reg_lwght and max sure no value is too small
 #             dem_reg_lwght=(np.convolve(dem_reg_lwght,np.ones(3)/3))[1:-1]/np.max(dem_reg_lwght[:])     
@@ -293,7 +294,7 @@ def dem_pix(dnin,ednin,rmatrix,logt,dlogt,glc,reg_tweak=1.0,max_iter=10,rgt_fact
 
         #work out the theoretical dn and compare to the input dn
         dn_reg=(rmatrix.T @ dem_reg_out).squeeze()
-        residuals=(dnin-dn_reg)/ednin
+        residuals=(dnin - dn_reg) / ednin_safe
         #work out the chisquared
         chisq=np.sum(residuals**2)/(nf)
 

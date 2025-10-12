@@ -1,0 +1,37 @@
+{
+  "impl": "dask",
+  "frame_size": [
+    4096,
+    4096
+  ],
+  "tile": 512,
+  "nmu": 42,
+  "nt": 25,
+  "compute_seconds": 1869.6588,
+  "mpixels_per_sec": 0.009,
+  "dem_shape": [
+    4096,
+    4096,
+    25
+  ],
+  "edem_shape": [
+    4096,
+    4096,
+    25
+  ],
+  "chisq_shape": [
+    4096,
+    4096
+  ],
+  "dask": {
+    "n_workers": 8,
+    "threads_per_worker": 1
+  },
+  "slurm": {
+    "job_id": null,
+    "cpus_per_task": null,
+    "ntasks": null,
+    "node": "server0103"
+  },
+  "timestamp": "20251012_190859"
+}

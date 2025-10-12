@@ -1,11 +1,12 @@
 # src/common/profiling/wallclock.py
 from __future__ import annotations
+
 """
-Simple wall-clock benchmarking utilities for the vendor DEM solver.
+Backend-agnostic wall-clock benchmarking utilities for DEM solvers.
 
 This module provides:
-  • A thin wrapper (`run_dn2dem`) that prepares inputs and calls the vendor
-    solver `dn2dem_pos`
+  • A backend-agnostic wrapper (`run_dn2dem`) that prepares inputs and calls
+    any compatible solver (NumPy, CuPy, or Dask-based)
   • A timing helper (`time_one`) that measures a single run and derives DEM/s
   • A streaming benchmark (`benchmark_wallclock`) that sweeps a set of square
     crop sizes with repeats, writing progress to CSV/JSONL/Markdown as it goes
@@ -16,8 +17,15 @@ Design notes
   is preempted or interrupted.
 - File writes use simple durability measures (flush + fsync; atomic rename for
   the summary Markdown).
-- The solver itself is treated as a black box and is imported from
-  `src.baseline.vendor.dn2dem_pos`. Error-modeling is intentionally minimal.
+- The solver is backend-agnostic and passed as a parameter.
+- Error-modeling is intentionally minimal.
+
+Backend Support
+---------------
+Automatically detects and supports:
+  • NumPy arrays (CPU baseline)
+  • CuPy arrays (single/multi GPU)
+  • Dask arrays (distributed)
 """
 
 import csv
@@ -26,12 +34,11 @@ import os
 import time
 import statistics as stats
 from pathlib import Path
-from typing import Iterable, List, Tuple, Callable, Optional
+from typing import Iterable, List, Tuple, Callable, Optional, Any
 
 import numpy as np
 
-# vendor solver entry point (treated as a black box here)
-from src.baseline.vendor.dn2dem_pos import dn2dem_pos
+from .backend_utils import get_array_module as _get_array_module
 
 
 def _atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
@@ -102,43 +109,45 @@ def _rewrite_summary_md(md_path: Path, rows: List[dict]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Core runner (vendor solver wrapper and single-run timer)
+# Core runner (backend-agnostic solver wrapper and single-run timer)
 # ---------------------------------------------------------------------------
 
 def run_dn2dem(
-    frame_6hw: np.ndarray,
-    T_RESP: np.ndarray,
-    T_RESP_LOGT: np.ndarray,
-    TEMPS: np.ndarray,
-    *,
-    nmu: int = 42,
-    dtype: np.dtype = np.float32,
-    solver_fn: Optional[Callable] = None,
-    error_model: str = "sqrt",
-    err_a: float = 1.0,
-    err_b: float = 1e-6,
+        frame_6hw,  # Can be np.ndarray, cp.ndarray, or da.Array
+        T_RESP,
+        T_RESP_LOGT,
+        TEMPS,
+        *,
+        nmu: int = 42,
+        dtype=None,
+        solver_fn: Callable,
+        error_model: str = "sqrt",
+        err_a: float = 1.0,
+        err_b: float = 1e-6,
 ):
     """
-    Prepare inputs and call the provided solver (defaults to vendor `dn2dem_pos`).
+    Prepare inputs and call the provided solver (backend-agnostic).
 
     Parameters
     ----------
-    frame_6hw : np.ndarray
-        Channel-first frame shaped (6, H, W). It is converted to (H, W, 6)
-        for the solver, sanitized to be finite/non-negative, and cast to `dtype`.
-    T_RESP : np.ndarray
+    frame_6hw : array-like
+        Channel-first frame shaped (6, H, W). Can be NumPy, CuPy, or Dask array.
+        It is converted to (H, W, 6) for the solver, sanitized to be
+        finite/non-negative, and cast to `dtype`.
+    T_RESP : array-like
         Temperature-response matrix (n_tresp, nf).
-    T_RESP_LOGT : np.ndarray
+    T_RESP_LOGT : array-like
         1-D array of log(T) sample positions (length n_tresp).
-    TEMPS : np.ndarray
+    TEMPS : array-like
         1-D array of DEM bin edges.
     nmu : int, default 42
         Regularization parameter forwarded to the solver.
-    dtype : np.dtype, default np.float32
-        Dtype for the finite/clipped input intensities.
-    solver_fn : Callable | None, default None
-        Solver function with signature compatible to `dn2dem_pos`. If None,
-        `dn2dem_pos` is used.
+    dtype : dtype-like, default None
+        Dtype for the finite/clipped input intensities. If None, uses
+        float32 from the detected backend.
+    solver_fn : Callable
+        Solver function with signature compatible to `dn2dem_pos`.
+        **REQUIRED** - no default solver to maintain backend independence.
     error_model : {"sqrt", "linear", "constant"}, default "sqrt"
         How to build the per-pixel/channel uncertainties `e` from `f`.
     err_a : float, default 1.0
@@ -150,19 +159,59 @@ def run_dn2dem(
     -------
     tuple
         (demmap, edemmap, logT_bins, chisq, dn_reg) as provided by the solver.
+
+    Notes
+    -----
+    - Backend (numpy/cupy/dask) is auto-detected from `frame_6hw` type.
+    - All array operations use the detected backend's functions.
     """
-    if solver_fn is None:
-        solver_fn = dn2dem_pos
+    # Detect backend
+    xp = _get_array_module(frame_6hw)
 
-    f = np.moveaxis(frame_6hw, 0, -1).astype(dtype, copy=False)  # (H, W, 6)
-    f = np.clip(np.nan_to_num(f, nan=0.0, posinf=0.0, neginf=0.0), 0, None)
+    # Set default dtype if not provided
+    if dtype is None:
+        dtype = xp.float32
 
+    # Move channels: (6, H, W) -> (H, W, 6)
+    f = xp.moveaxis(frame_6hw, 0, -1)
+
+    # Cast to target dtype
+    if hasattr(f, 'astype'):
+        f = f.astype(dtype, copy=False)
+
+    # Sanitize: remove NaN/Inf and clip to non-negative
+    if hasattr(xp, 'nan_to_num'):
+        f = xp.nan_to_num(f, nan=0.0, posinf=0.0, neginf=0.0)
+    elif hasattr(xp, 'isfinite'):  # Dask fallback
+        # For Dask, replace non-finite with zero
+        f = xp.where(xp.isfinite(f), f, 0.0)
+
+    # Clip to non-negative
+    if hasattr(xp, 'clip'):
+        f = xp.clip(f, 0, None)
+    elif hasattr(xp, 'maximum'):  # Alternative for some backends
+        f = xp.maximum(f, 0)
+
+    # Build error array based on error model
     if error_model == "sqrt":
-        e = np.sqrt(f, dtype=np.float32) + float(err_b)
+        e = xp.sqrt(f)
+        if hasattr(e, 'astype'):
+            e = e.astype(xp.float32, copy=False)
+        e = e + float(err_b)
     elif error_model == "linear":
-        e = float(err_a) * f.astype(np.float32, copy=False) + float(err_b)
+        if hasattr(f, 'astype'):
+            f_float = f.astype(xp.float32, copy=False)
+        else:
+            f_float = f
+        e = float(err_a) * f_float + float(err_b)
     elif error_model == "constant":
-        e = np.full_like(f, float(err_b), dtype=np.float32)
+        if hasattr(xp, 'full_like'):
+            e = xp.full_like(f, float(err_b), dtype=xp.float32)
+        else:
+            # Fallback for backends without full_like
+            e = xp.ones_like(f) * float(err_b)
+            if hasattr(e, 'astype'):
+                e = e.astype(xp.float32, copy=False)
     else:
         raise ValueError(f"Unknown error_model: {error_model}")
 
@@ -170,38 +219,50 @@ def run_dn2dem(
 
 
 def time_one(
-    frame_6hw: np.ndarray,
-    T_RESP: np.ndarray,
-    T_RESP_LOGT: np.ndarray,
-    TEMPS: np.ndarray,
-    *,
-    nmu: int = 42,
-    dtype: np.dtype = np.float32,
-    solver_fn: Optional[Callable] = None,
-    error_model: str = "sqrt",
-    err_a: float = 1.0,
-    err_b: float = 1e-6,
+        frame_6hw,
+        T_RESP,
+        T_RESP_LOGT,
+        TEMPS,
+        *,
+        nmu: int = 42,
+        dtype=None,
+        solver_fn: Callable,
+        error_model: str = "sqrt",
+        err_a: float = 1.0,
+        err_b: float = 1e-6,
+        synchronize_fn: Optional[Callable] = None,
 ) -> Tuple[float, float]:
     """
     Run the solver once and return (elapsed_seconds, DEMs_per_second).
 
     Parameters
     ----------
-    frame_6hw : np.ndarray
-        Input frame shaped (6, H, W).
+    frame_6hw : array-like
+        Input frame shaped (6, H, W). Can be NumPy, CuPy, or Dask array.
     T_RESP, T_RESP_LOGT, TEMPS :
         See `run_dn2dem` for details.
     nmu, dtype, solver_fn, error_model, err_a, err_b :
         Forwarded to `run_dn2dem`.
+    synchronize_fn : Callable | None, optional
+        Optional synchronization function to call before stopping the timer.
+        For GPU: pass `cupy.cuda.Device().synchronize`
+        For Dask: pass `result.compute` or similar
+        For NumPy: None (no synchronization needed)
 
     Returns
     -------
     (float, float)
         Tuple of (elapsed_seconds, pixels_per_second) where the latter is
         computed as (H * W) / elapsed_seconds.
+
+    Notes
+    -----
+    - For GPU benchmarks, always provide `synchronize_fn` to ensure accurate timing.
+    - For Dask benchmarks, synchronization may trigger computation.
     """
     t0 = time.perf_counter()
-    _ = run_dn2dem(
+
+    result = run_dn2dem(
         frame_6hw,
         T_RESP,
         T_RESP_LOGT,
@@ -213,8 +274,17 @@ def time_one(
         err_a=err_a,
         err_b=err_b,
     )
+
+    # Synchronize if needed (GPU or Dask)
+    if synchronize_fn is not None:
+        synchronize_fn()
+
     dt = time.perf_counter() - t0
-    H, W = frame_6hw.shape[1], frame_6hw.shape[2]
+
+    # Get spatial dimensions (backend-agnostic)
+    shape = frame_6hw.shape
+    H, W = shape[1], shape[2]  # Assumes (6, H, W)
+
     return dt, (H * W) / dt
 
 
@@ -223,20 +293,22 @@ def time_one(
 # ---------------------------------------------------------------------------
 
 def benchmark_wallclock(
-    STACK: np.ndarray,
-    T_RESP: np.ndarray,
-    T_RESP_LOGT: np.ndarray,
-    TEMPS: np.ndarray,
-    *,
-    sizes: Iterable[int] = (14, 64, 256, 1024),
-    repeats: int = 5,
-    nmu: int = 42,
-    dtype: np.dtype = np.float32,
-    outdir: Path | str = "benchmark_out",
-    solver_fn: Optional[Callable] = None,
-    error_model: str = "sqrt",
-    err_a: float = 1.0,
-    err_b: float = 1e-6,
+        STACK,  # Can be np.ndarray, cp.ndarray, or da.Array
+        T_RESP,
+        T_RESP_LOGT,
+        TEMPS,
+        *,
+        sizes: Iterable[int] = (14, 64, 256, 1024),
+        repeats: int = 5,
+        nmu: int = 42,
+        dtype=None,
+        outdir: Path | str = "benchmark_out",
+        solver_fn: Callable,
+        error_model: str = "sqrt",
+        err_a: float = 1.0,
+        err_b: float = 1e-6,
+        synchronize_fn: Optional[Callable] = None,
+        warmup_runs: int = 3,
 ) -> List[dict]:
     """
     Run repeated wall-clock timings over several square crops, streaming results.
@@ -244,35 +316,52 @@ def benchmark_wallclock(
     Streaming behavior
     ------------------
     After completing each size:
-      1) Append a row to CSV (`baseline_wallclock.csv`)
+      1) Append a row to CSV (`wallclock.csv`)
       2) Append the same row as JSON to a JSONL file (`progress.jsonl`)
       3) Rewrite a compact Markdown summary table (`summary.md`) atomically
 
     Parameters
     ----------
-    STACK : np.ndarray
+    STACK : array-like
         Input stack with at least one frame. Only frame 0 is used here.
-        Expected shapes are (F, H, W, 6) or (F, 6, H, W) depending on caller.
-        (This function indexes as `STACK[0, :, :sz, :sz]`, so the caller should
-        pass a stack where slicing this way yields a (6, sz, sz) plane-first view.)
+        Expected shape: (F, 6, H, W) - channels-first.
+        Can be NumPy, CuPy, or Dask array.
     T_RESP, T_RESP_LOGT, TEMPS :
         See `run_dn2dem`.
     sizes : Iterable[int], default (14, 64, 256, 1024)
         Square crop sizes to benchmark (sz → sz×sz).
     repeats : int, default 5
-        Number of timed repetitions per size (after a fixed warm-up).
+        Number of timed repetitions per size (after warm-up).
     nmu, dtype, solver_fn, error_model, err_a, err_b :
         Forwarded to `time_one` / `run_dn2dem`.
     outdir : str | pathlib.Path, default "benchmark_out"
         Output directory for CSV/JSONL/Markdown. Created if missing.
+    synchronize_fn : Callable | None, optional
+        Synchronization function for accurate timing (see `time_one`).
+    warmup_runs : int, default 3
+        Number of warm-up runs before timing (for JIT, cache warming, etc.).
 
     Returns
     -------
     list[dict]
         Accumulated per-size rows containing means/medians, throughput, etc.
+
+    Notes
+    -----
+    - Only the first frame (STACK[0]) is used.
+    - Backend is auto-detected from STACK type.
+    - For GPU: provide `synchronize_fn` for accurate timing.
+    - For Dask: may need special handling (compute triggers).
     """
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
+
+    # Detect backend
+    xp = _get_array_module(STACK)
+
+    # Set default dtype
+    if dtype is None:
+        dtype = xp.float32
 
     # Warn if multiple frames present (only the first is used)
     try:
@@ -286,18 +375,18 @@ def benchmark_wallclock(
         # If shape probing fails, proceed silently.
         pass
 
-    csv_path = outdir / "baseline_wallclock.csv"
+    csv_path = outdir / "wallclock.csv"
     md_path = outdir / "summary.md"
     jl_path = outdir / "progress.jsonl"  # one JSON object per line, per size
 
     rows: List[dict] = []
 
     for sz in sizes:
-        # Take a square crop from the first frame; calling code ensures layout.
+        # Take a square crop from the first frame: (6, sz, sz)
         frame = STACK[0, :, :sz, :sz]
 
         # Warm-up runs to stabilize JIT/BLAS/caches
-        for __ in range(3):
+        for _ in range(warmup_runs):
             _ = time_one(
                 frame,
                 T_RESP,
@@ -309,6 +398,7 @@ def benchmark_wallclock(
                 error_model=error_model,
                 err_a=err_a,
                 err_b=err_b,
+                synchronize_fn=synchronize_fn,
             )
 
         # Timed repeats
@@ -325,6 +415,7 @@ def benchmark_wallclock(
                 error_model=error_model,
                 err_a=err_a,
                 err_b=err_b,
+                synchronize_fn=synchronize_fn,
             )
             dts.append(dt)
             thr.append(dems)
@@ -342,6 +433,7 @@ def benchmark_wallclock(
             dems_per_s_median=float(stats.median(thr)),
             nmu=int(nmu),
             dtype=str(dtype),
+            backend=xp.__name__,  # Record backend used
         )
         rows.append(row)
 

@@ -1,0 +1,73 @@
+[OPT][87780] Job on nodes: server0092
+[OPT][87780] MPI tasks: 4  GPUs/task: 1  CPUs/task: 3
+[OPT][87780] GPU inventory:
+index, name, memory.total [MiB], pci.bus_id
+0, NVIDIA GeForce RTX 2080 Ti, 11264 MiB, 00000000:21:00.0
+1, NVIDIA GeForce RTX 2080 Ti, 11264 MiB, 00000000:22:00.0
+2, NVIDIA GeForce RTX 2080 Ti, 11264 MiB, 00000000:42:00.0
+3, NVIDIA GeForce RTX 2080 Ti, 11264 MiB, 00000000:61:00.0
+[OPT][87780] GPU topology for large image processing optimization:
+	[4mGPU0	GPU1	GPU2	GPU3	CPU Affinity	NUMA Affinity	GPU NUMA ID[0m
+GPU0	 X 	PHB	SYS	SYS	8-11,40-43	1		N/A
+GPU1	PHB	 X 	SYS	SYS	8-11,40-43	1		N/A
+GPU2	SYS	SYS	 X 	SYS			N/A		N/A
+GPU3	SYS	SYS	SYS	 X 		3		N/A
+
+Legend:
+
+  X    = Self
+  SYS  = Connection traversing PCIe as well as the SMP interconnect between NUMA nodes (e.g., QPI/UPI)
+  NODE = Connection traversing PCIe as well as the interconnect between PCIe Host Bridges within a NUMA node
+  PHB  = Connection traversing PCIe as well as a PCIe Host Bridge (typically the CPU)
+  PXB  = Connection traversing multiple PCIe bridges (without traversing the PCIe Host Bridge)
+  PIX  = Connection traversing at most a single PCIe bridge
+  NV#  = Connection traversing a bonded set of # NVLinks
+Installing dependencies from lock file
+
+No dependencies to install or update
+
+Installing the current project: hpcp-assignment (0.1.0)
+[OPT][87780] Config: LOG_LEVEL=WARNING VERBOSE=0 PROFILE=0 NVTX=0 BATCH_SIZE=0
+2025-10-12 20:50:50,150 - rank=0 - INFO - __main__ - Processing 10 input files across 4 ranks
+2025-10-12 20:50:52,164 - rank=0 - INFO - __main__ - Starting processing input 20170906_12_00_12.npz
+2025-10-12 20:50:52,560 - rank=0 - INFO - __main__ - Pixels per rank (total=16777216): [4194304, 4194304, 4194304, 4194304]
+2025-10-12 20:52:28,969 - rank=0 - INFO - __main__ - Computed total DEMs: 16777216
+2025-10-12 20:52:29,752 - rank=0 - INFO - __main__ - Finished processing input 20170906_12_00_12.npz in 97.59s
+2025-10-12 20:52:29,752 - rank=0 - INFO - __main__ - Starting processing input 20170906_12_00_36.npz
+2025-10-12 20:52:29,752 - rank=0 - INFO - __main__ - Pixels per rank (total=16777216): [4194304, 4194304, 4194304, 4194304]
+2025-10-12 20:53:00,806 - rank=0 - INFO - __main__ - Computed total DEMs: 16777216
+2025-10-12 20:53:01,046 - rank=0 - INFO - __main__ - Finished processing input 20170906_12_00_36.npz in 31.29s
+2025-10-12 20:53:01,046 - rank=0 - INFO - __main__ - Starting processing input 20170906_12_01_00.npz
+2025-10-12 20:53:01,046 - rank=0 - INFO - __main__ - Pixels per rank (total=16777216): [4194304, 4194304, 4194304, 4194304]
+2025-10-12 20:53:25,010 - rank=0 - INFO - __main__ - Computed total DEMs: 16777216
+2025-10-12 20:53:25,271 - rank=0 - INFO - __main__ - Finished processing input 20170906_12_01_00.npz in 24.23s
+2025-10-12 20:53:25,272 - rank=0 - INFO - __main__ - Starting processing input 20170906_12_01_24.npz
+2025-10-12 20:53:25,272 - rank=0 - INFO - __main__ - Pixels per rank (total=16777216): [4194304, 4194304, 4194304, 4194304]
+2025-10-12 20:53:51,288 - rank=0 - INFO - __main__ - Computed total DEMs: 16777216
+2025-10-12 20:53:51,541 - rank=0 - INFO - __main__ - Finished processing input 20170906_12_01_24.npz in 26.27s
+2025-10-12 20:53:51,541 - rank=0 - INFO - __main__ - Starting processing input 20170906_12_01_48.npz
+2025-10-12 20:53:51,541 - rank=0 - INFO - __main__ - Pixels per rank (total=16777216): [4194304, 4194304, 4194304, 4194304]
+2025-10-12 20:54:18,903 - rank=0 - INFO - __main__ - Computed total DEMs: 16777216
+2025-10-12 20:54:19,156 - rank=0 - INFO - __main__ - Finished processing input 20170906_12_01_48.npz in 27.62s
+2025-10-12 20:54:19,156 - rank=0 - INFO - __main__ - Starting processing input 20170906_12_02_12.npz
+2025-10-12 20:54:19,156 - rank=0 - INFO - __main__ - Pixels per rank (total=16777216): [4194304, 4194304, 4194304, 4194304]
+2025-10-12 20:54:45,903 - rank=0 - INFO - __main__ - Computed total DEMs: 16777216
+2025-10-12 20:54:46,159 - rank=0 - INFO - __main__ - Finished processing input 20170906_12_02_12.npz in 27.00s
+2025-10-12 20:54:46,160 - rank=0 - INFO - __main__ - Starting processing input 20170906_12_02_36.npz
+2025-10-12 20:54:46,160 - rank=0 - INFO - __main__ - Pixels per rank (total=16777216): [4194304, 4194304, 4194304, 4194304]
+2025-10-12 20:55:14,426 - rank=0 - INFO - __main__ - Computed total DEMs: 16777216
+2025-10-12 20:55:14,679 - rank=0 - INFO - __main__ - Finished processing input 20170906_12_02_36.npz in 28.52s
+2025-10-12 20:55:14,679 - rank=0 - INFO - __main__ - Starting processing input 20170906_12_03_00.npz
+2025-10-12 20:55:14,679 - rank=0 - INFO - __main__ - Pixels per rank (total=16777216): [4194304, 4194304, 4194304, 4194304]
+2025-10-12 20:55:43,447 - rank=0 - INFO - __main__ - Computed total DEMs: 16777216
+2025-10-12 20:55:43,698 - rank=0 - INFO - __main__ - Finished processing input 20170906_12_03_00.npz in 29.02s
+2025-10-12 20:55:43,698 - rank=0 - INFO - __main__ - Starting processing input 20170906_12_03_24.npz
+2025-10-12 20:55:43,698 - rank=0 - INFO - __main__ - Pixels per rank (total=16777216): [4194304, 4194304, 4194304, 4194304]
+2025-10-12 20:56:09,378 - rank=0 - INFO - __main__ - Computed total DEMs: 16777216
+2025-10-12 20:56:09,632 - rank=0 - INFO - __main__ - Finished processing input 20170906_12_03_24.npz in 25.93s
+2025-10-12 20:56:09,632 - rank=0 - INFO - __main__ - Starting processing input 20170906_12_03_48.npz
+2025-10-12 20:56:09,632 - rank=0 - INFO - __main__ - Pixels per rank (total=16777216): [4194304, 4194304, 4194304, 4194304]
+2025-10-12 20:56:35,800 - rank=0 - INFO - __main__ - Computed total DEMs: 16777216
+2025-10-12 20:56:36,046 - rank=0 - INFO - __main__ - Finished processing input 20170906_12_03_48.npz in 26.41s
+[OPT][87780] Completed with exit code 0
+[OPT][87780] NVTX profiling (MULTIGPU_NVTX=0); PROFILE=0

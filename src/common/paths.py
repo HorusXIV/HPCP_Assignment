@@ -1,5 +1,6 @@
 # src/common/paths.py
 from __future__ import annotations
+
 """
 Common path helpers for locating repository resources and constructing
 run/output directories (including SLURM-aware defaults).
@@ -27,7 +28,6 @@ Highlights
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Union
 
 
 # ---------------------------
@@ -41,7 +41,7 @@ def _repo_root() -> Path:
 
     Returns
     -------
-    pathlib.Path
+    Path
         Absolute path to the repo root.
     """
     return Path(__file__).resolve().parents[2]
@@ -49,12 +49,18 @@ def _repo_root() -> Path:
 
 def project_root() -> Path:
     """
-    Public alias for the repository root.
+    Get the absolute path to the repository root.
 
     Returns
     -------
-    pathlib.Path
+    Path
         Absolute path to the repo root.
+
+    Examples
+    --------
+    >>> root = project_root()
+    >>> (root / "src" / "common").exists()
+    True
     """
     return _repo_root()
 
@@ -64,19 +70,26 @@ def project_root() -> Path:
 # ---------------------------
 
 
-def slurm_context() -> dict:
+def slurm_context() -> dict[str, str | None]:
     """
     Collect a minimal SLURM context snapshot from environment variables.
 
     Returns
     -------
-    dict
+    dict[str, str | None]
+        Dictionary with SLURM environment variables:
         {
           "job_id", "job_name",
           "array_job_id", "array_task_id",
           "tmpdir", "submit_dir",
-          "scratch"
+          "scratch", "nodelist", "cpus_per_task"
         }
+
+    Examples
+    --------
+    >>> ctx = slurm_context()
+    >>> if ctx["job_id"]:
+    ...     print(f"Running in SLURM job {ctx['job_id']}")
     """
     env = os.environ
     return {
@@ -87,7 +100,26 @@ def slurm_context() -> dict:
         "tmpdir": env.get("SLURM_TMPDIR"),
         "submit_dir": env.get("SLURM_SUBMIT_DIR"),
         "scratch": env.get("SCRATCH") or env.get("PROJECT_SCRATCH"),
+        "nodelist": env.get("SLURM_NODELIST"),
+        "cpus_per_task": env.get("SLURM_CPUS_PER_TASK"),
     }
+
+
+def is_slurm_job() -> bool:
+    """
+    Check if currently running inside a SLURM job.
+
+    Returns
+    -------
+    bool
+        True if SLURM_JOB_ID is set, False otherwise.
+
+    Examples
+    --------
+    >>> if is_slurm_job():
+    ...     print("Running on SLURM cluster")
+    """
+    return os.environ.get("SLURM_JOB_ID") is not None
 
 
 # ---------------------------
@@ -95,20 +127,28 @@ def slurm_context() -> dict:
 # ---------------------------
 
 
-def data_dir(*sub: Union[str, Path]) -> Path:
+def data_dir(*sub: str | Path) -> Path:
     """
     Construct a path under `<repo>/data`.
+
+    Parameters
+    ----------
+    *sub : str | Path
+        Optional subdirectories to append.
+
+    Returns
+    -------
+    Path
+        Path under data directory.
 
     Examples
     --------
     >>> data_dir()
-    <repo>/data
+    PosixPath('.../data')
     >>> data_dir("np32")
-    <repo>/data/np32
-
-    Returns
-    -------
-    pathlib.Path
+    PosixPath('.../data/np32')
+    >>> data_dir("golden", "1024")
+    PosixPath('.../data/golden/1024')
     """
     p = project_root() / "data"
     for s in sub:
@@ -122,27 +162,55 @@ def np32_dir() -> Path:
 
     Returns
     -------
-    pathlib.Path
+    Path
+        Path to <repo>/data/np32
+
+    Examples
+    --------
+    >>> np32 = np32_dir()
+    >>> np32.name
+    'np32'
     """
     return data_dir("np32")
 
 
-def golden_dir(size: Optional[Union[int, str]] = None) -> Path:
+def golden_dir(size: int | str | None = None) -> Path:
     """
-    Default golden root or a specific size folder.
+    Default golden reference root or a specific size folder.
 
     Parameters
     ----------
-    size : int | str | None
+    size : int | str | None, optional
         If provided, returns `<repo>/data/golden/{size}`.
 
     Returns
     -------
-    pathlib.Path
+    Path
         `<repo>/data/golden` when size is None; otherwise the size subdir.
+
+    Examples
+    --------
+    >>> golden_dir()
+    PosixPath('.../data/golden')
+    >>> golden_dir(1024)
+    PosixPath('.../data/golden/1024')
+    >>> golden_dir("512x256")
+    PosixPath('.../data/golden/512x256')
     """
     base = data_dir("golden")
     return base / str(size) if size is not None else base
+
+
+def benchmark_dir() -> Path:
+    """
+    Default benchmark output directory.
+
+    Returns
+    -------
+    Path
+        Path to <repo>/benchmark_out
+    """
+    return project_root() / "benchmark_out"
 
 
 # ---------------------------
@@ -150,22 +218,42 @@ def golden_dir(size: Optional[Union[int, str]] = None) -> Path:
 # ---------------------------
 
 
-def _timestamp() -> str:
+def _timestamp(include_microseconds: bool = False) -> str:
     """
-    Compact but sortable timestamp of the form YYYYMMDD-HHMMSS.
+    Compact but sortable timestamp.
+
+    Parameters
+    ----------
+    include_microseconds : bool, default False
+        If True, include microseconds for finer granularity.
 
     Returns
     -------
     str
+        Timestamp in format YYYYMMDD-HHMMSS[.ffffff]
+
+    Examples
+    --------
+    >>> ts = _timestamp()
+    >>> len(ts)
+    15
+    >>> ts = _timestamp(include_microseconds=True)
+    >>> len(ts)
+    22
     """
-    return datetime.now().strftime("%Y%m%d-%H%M%S")
+    fmt = "%Y%m%d-%H%M%S"
+    if include_microseconds:
+        fmt += ".%f"
+    return datetime.now().strftime(fmt)
 
 
 def default_run_dir(
-    method: str, cli_outdir: Optional[str | os.PathLike] = None
+        method: str,
+        cli_outdir: str | Path | None = None,
+        create: bool = True,
 ) -> Path:
     """
-    Compute a sensible default output directory and create it.
+    Compute a sensible default output directory and optionally create it.
 
     Precedence for base directory
     -----------------------------
@@ -181,15 +269,35 @@ def default_run_dir(
     ----------
     method : str
         Logical method name (e.g., "baseline", "dask", "gpu").
-    cli_outdir : str | os.PathLike | None, default None
+        Will be lowercased and used as a subdirectory name.
+    cli_outdir : str | Path | None, default None
         Optional explicit base directory (e.g. from CLI).
+    create : bool, default True
+        If True, create the directory (with parents) if it doesn't exist.
 
     Returns
     -------
-    pathlib.Path
-        Absolute path to the created run directory.
+    Path
+        Absolute path to the run directory.
+
+    Raises
+    ------
+    ValueError
+        If method is empty after stripping.
+    OSError
+        If create=True but directory creation fails.
+
+    Examples
+    --------
+    >>> outdir = default_run_dir("baseline")  # doctest: +SKIP
+    >>> outdir.exists()
+    True
+    >>> outdir.name.startswith("20")  # Timestamp starts with year
+    True
     """
     method = str(method).strip().lower()
+    if not method:
+        raise ValueError("method cannot be empty")
 
     # 1) explicit CLI
     if cli_outdir:
@@ -211,11 +319,16 @@ def default_run_dir(
 
     # Suffix for uniqueness and traceability
     sctx = slurm_context()
-    job_bits = []
+    job_bits: list[str] = []
+
     if sctx.get("job_name"):
-        job_bits.append(str(sctx["job_name"]))
+        # Sanitize job name (remove special chars that might cause issues)
+        job_name = str(sctx["job_name"]).replace("/", "-").replace(" ", "_")
+        job_bits.append(job_name)
+
     if sctx.get("job_id"):
         job_bits.append(f"job{sctx['job_id']}")
+
     if sctx.get("array_task_id"):
         job_bits.append(f"task{sctx['array_task_id']}")
 
@@ -223,23 +336,164 @@ def default_run_dir(
     tail = "-".join(filter(None, [stamp] + job_bits)) or stamp
 
     outdir = (base / method / tail).resolve()
-    outdir.mkdir(parents=True, exist_ok=True)
+
+    if create:
+        try:
+            outdir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise OSError(
+                f"Failed to create output directory {outdir}: {e}"
+            ) from e
+
     return outdir
 
 
-def resolve_relative_to_repo(path_like: str | os.PathLike) -> Path:
+def resolve_relative_to_repo(path_like: str | Path) -> Path:
     """
     Resolve a path against the repository root if it is not absolute.
 
     Parameters
     ----------
-    path_like : str | os.PathLike
+    path_like : str | Path
         Path to resolve.
 
     Returns
     -------
-    pathlib.Path
+    Path
         Absolute path.
+
+    Examples
+    --------
+    >>> p = resolve_relative_to_repo("data/np32")
+    >>> p.is_absolute()
+    True
+    >>> p.name
+    'np32'
+
+    >>> p = resolve_relative_to_repo("/absolute/path")
+    >>> str(p)
+    '/absolute/path'
     """
     p = Path(path_like)
     return p if p.is_absolute() else (_repo_root() / p).resolve()
+
+
+def ensure_dir(path: str | Path, parents: bool = True) -> Path:
+    """
+    Ensure a directory exists, creating it if necessary.
+
+    Parameters
+    ----------
+    path : str | Path
+        Directory path to ensure exists.
+    parents : bool, default True
+        If True, create parent directories as needed.
+
+    Returns
+    -------
+    Path
+        Absolute path to the directory.
+
+    Raises
+    ------
+    OSError
+        If directory creation fails.
+    FileExistsError
+        If path exists but is not a directory.
+
+    Examples
+    --------
+    >>> tmpdir = ensure_dir("/tmp/test_dir")  # doctest: +SKIP
+    >>> tmpdir.exists()
+    True
+    >>> tmpdir.is_dir()
+    True
+    """
+    p = Path(path).resolve()
+
+    if p.exists():
+        if not p.is_dir():
+            raise FileExistsError(
+                f"Path exists but is not a directory: {p}"
+            )
+        return p
+
+    try:
+        p.mkdir(parents=parents, exist_ok=True)
+    except OSError as e:
+        raise OSError(f"Failed to create directory {p}: {e}") from e
+
+    return p
+
+
+def list_data_files(
+        pattern: str = "*.npz",
+        directory: str | Path | None = None,
+) -> list[Path]:
+    """
+    List data files matching a pattern.
+
+    Parameters
+    ----------
+    pattern : str, default "*.npz"
+        Glob pattern to match.
+    directory : str | Path | None, optional
+        Directory to search. If None, uses <repo>/data/np32.
+
+    Returns
+    -------
+    list[Path]
+        Sorted list of matching files.
+
+    Examples
+    --------
+    >>> files = list_data_files("*.npz")  # doctest: +SKIP
+    >>> all(f.suffix == ".npz" for f in files)
+    True
+    """
+    if directory is None:
+        directory = np32_dir()
+    else:
+        directory = Path(directory)
+
+    if not directory.exists():
+        return []
+
+    return sorted(directory.glob(pattern))
+
+
+def get_run_metadata() -> dict[str, str | None]:
+    """
+    Collect metadata about the current run environment.
+
+    Returns
+    -------
+    dict
+        Metadata including:
+        - hostname
+        - user
+        - slurm_job_id
+        - slurm_job_name
+        - timestamp
+
+    Examples
+    --------
+    >>> meta = get_run_metadata()
+    >>> "hostname" in meta
+    True
+    >>> "timestamp" in meta
+    True
+    """
+    import socket
+    import getpass
+
+    sctx = slurm_context()
+
+    return {
+        "hostname": socket.gethostname(),
+        "user": getpass.getuser(),
+        "slurm_job_id": sctx.get("job_id"),
+        "slurm_job_name": sctx.get("job_name"),
+        "slurm_array_task_id": sctx.get("array_task_id"),
+        "timestamp": _timestamp(include_microseconds=True),
+    }

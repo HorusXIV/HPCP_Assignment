@@ -1,0 +1,256 @@
+--------------------------------------------------------------------------
+A requested component was not found, or was unable to be opened.  This
+means that this component is either not installed or is unable to be
+used on your system (e.g., sometimes this means that shared libraries
+that the component requires are unable to be found/loaded).  Note that
+PMIx stopped checking at the first component that it did not find.
+
+Host:      server0092
+Framework: psec
+Component: munge
+--------------------------------------------------------------------------
+
+--------------------------------------------------------------------------
+A requested component was not found, or was unable to be opened.  This
+means that this component is either not installed or is unable to be
+used on your system (e.g., sometimes this means that shared libraries
+that the component requires are unable to be found/loaded).  Note that
+PMIx stopped checking at the first component that it did not find.
+
+Host:      server0092
+Framework: psec
+Component: munge
+--------------------------------------------------------------------------
+
+--------------------------------------------------------------------------
+A requested component was not found, or was unable to be opened.  This
+means that this component is either not installed or is unable to be
+used on your system (e.g., sometimes this means that shared libraries
+that the component requires are unable to be found/loaded).  Note that
+PMIx stopped checking at the first component that it did not find.
+
+Host:      server0092
+Framework: psec
+Component: munge
+--------------------------------------------------------------------------
+
+--------------------------------------------------------------------------
+A requested component was not found, or was unable to be opened.  This
+means that this component is either not installed or is unable to be
+used on your system (e.g., sometimes this means that shared libraries
+that the component requires are unable to be found/loaded).  Note that
+PMIx stopped checking at the first component that it did not find.
+
+Host:      server0092
+Framework: psec
+Component: munge
+--------------------------------------------------------------------------
+
+--------------------------------------------------------------------------
+A requested component was not found, or was unable to be opened.  This
+means that this component is either not installed or is unable to be
+used on your system (e.g., sometimes this means that shared libraries
+that the component requires are unable to be found/loaded).  Note that
+PMIx stopped checking at the first component that it did not find.
+
+Host:      server0092
+Framework: psec
+Component: munge
+--------------------------------------------------------------------------
+
+--------------------------------------------------------------------------
+A requested component was not found, or was unable to be opened.  This
+means that this component is either not installed or is unable to be
+used on your system (e.g., sometimes this means that shared libraries
+that the component requires are unable to be found/loaded).  Note that
+PMIx stopped checking at the first component that it did not find.
+
+Host:      server0092
+Framework: psec
+Component: munge
+--------------------------------------------------------------------------
+
+--------------------------------------------------------------------------
+A requested component was not found, or was unable to be opened.  This
+means that this component is either not installed or is unable to be
+used on your system (e.g., sometimes this means that shared libraries
+that the component requires are unable to be found/loaded).  Note that
+PMIx stopped checking at the first component that it did not find.
+
+Host:      server0092
+Framework: psec
+Component: munge
+--------------------------------------------------------------------------
+
+--------------------------------------------------------------------------
+A requested component was not found, or was unable to be opened.  This
+means that this component is either not installed or is unable to be
+used on your system (e.g., sometimes this means that shared libraries
+that the component requires are unable to be found/loaded).  Note that
+PMIx stopped checking at the first component that it did not find.
+
+Host:      server0092
+Framework: psec
+Component: munge
+--------------------------------------------------------------------------
+
+Exception ignored in: <cyfunction Stream.__del__ at 0x7a14a010e670>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+Exception ignored in: <cyfunction Stream.__del__ at 0x76e99d2b6810>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+Exception ignored in: <cyfunction Stream.__del__ at 0x72f1c6052670>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+Exception ignored in: <cyfunction Stream.__del__ at 0x705d35daa810>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+AttributeError: 'Stream' object has no attribute 'ptr'
+AttributeError: 'Stream' object has no attribute 'ptr'
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x76e99d2b6810>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x7a14a010e670>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x72f1c6052670>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x705d35daa810>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x76e99d2b6810>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x7a14a010e670>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+Exception ignored in: <cyfunction Stream.__del__ at 0x72f1c6052670>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x705d35daa810>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x76e99d2b6810>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x72f1c6052670>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x7a14a010e670>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x705d35daa810>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x76e99d2b6810>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x7a14a010e670>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x72f1c6052670>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x705d35daa810>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x76e99d2b6810>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x72f1c6052670>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x7a14a010e670>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x705d35daa810>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x76e99d2b6810>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x72f1c6052670>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x7a14a010e670>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x705d35daa810>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x76e99d2b6810>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x72f1c6052670>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x7a14a010e670>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x705d35daa810>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x76e99d2b6810>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x72f1c6052670>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x7a14a010e670>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x705d35daa810>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x76e99d2b6810>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x7a14a010e670>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x72f1c6052670>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'
+Exception ignored in: <cyfunction Stream.__del__ at 0x705d35daa810>
+Traceback (most recent call last):
+  File "cupy/cuda/stream.pyx", line 491, in cupy.cuda.stream.Stream.__del__
+AttributeError: 'Stream' object has no attribute 'ptr'

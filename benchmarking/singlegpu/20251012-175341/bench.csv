@@ -1,0 +1,2 @@
+stamp,mode,frames,H,W,Th,Tw,nmu,total_seconds,tiles_per_s,dems_per_s,verify,verify_ok,outputs_npz
+20251012-175341,single-gpu,1,4096,4096,256,256,42,34.835782,7.348765748643918,481608.7121031278,False,False,benchmarking/singlegpu/20251012-175341/outputs_20251012-175341_0.npz
