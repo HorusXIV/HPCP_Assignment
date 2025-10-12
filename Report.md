@@ -1,7 +1,6 @@
 HPC Assignment — Accelerating DEMREG
 ---
 # Contents
-# Contents
 
 - [Introduction](#introduction)
 - [Methodology](#methodology)
@@ -114,15 +113,15 @@ All runs are written to method-specific folders with a run card (Markdown) and m
 | Baseline (CPU) |                  2204.0 | 20.0 | 16 | 0 |
 | Dask (CPU-only) |                   974.0 |  | 32 | 0 |
 | Single-GPU (CuPy) |                    35.0 |  | 2 | 1 |
-| Multi-GPU (CuPy+MPI) |                    26.0 |  | 12 | 4 |
+| Multi-GPU (CuPy+MPI) |                   28.99 |  | 12 | 4 |
 
 ## Raw Speedup vs. Baseline
 
 | Method | Raw Speedup (×) |
-|---|---:|
-| Dask (CPU-only) | 2.26× |
-| Single-GPU (CuPy) | 62.97× |
-| Multi-GPU (CuPy+MPI) | 84.77× |
+|---|----------------:|
+| Dask (CPU-only) |           2.26× |
+| Single-GPU (CuPy) |          62.97× |
+| Multi-GPU (CuPy+MPI) |          76.03× |  
 
 ## Dask Normalization (CPU-only)
 
