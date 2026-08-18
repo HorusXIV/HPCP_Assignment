@@ -1,12 +1,13 @@
-HPC Assignment — Accelerating DEMREG
+HPC Assignment: Accelerating DEMREG
 ---
 # Contents
 
+- [Contents](#contents)
 - [Introduction](#introduction)
 - [Methodology](#methodology)
-  - [Problem & Baseline Definition](#problem--baseline-definition)
-  - [Dataset & Preparation](#dataset--preparation)
-  - [Hardware & Environment](#hardware--environment)
+  - [Problem \& Baseline Definition](#problem--baseline-definition)
+  - [Dataset \& Preparation](#dataset--preparation)
+  - [Hardware \& Environment](#hardware--environment)
   - [Evaluation Metrics](#evaluation-metrics)
   - [Benchmark Protocol](#benchmark-protocol)
 - [Benchmarking Results](#benchmarking-results)
@@ -15,33 +16,33 @@ HPC Assignment — Accelerating DEMREG
   - [Dask Normalization (CPU-only)](#dask-normalization-cpu-only)
     - [Interpretation](#interpretation)
   - [GPU Methods (context)](#gpu-methods-context)
-  - [Variance & Threats (recap)](#variance--threats-recap)
-- [Baseline (CPU) Setup](#baseline-cpu-setup)
-- [Accelerating with Dask](#accelerating-with-dask)
-- [Accelerating with Numba and CuPy](#accelerating-with-numba-and-cupy)
-  - [Initial Improvement of Baseline](#initial-improvement-of-baseline)
-  - [Transition to CuPy](#transition-to-cupy)
-  - [Profiling and Observations](#profiling-and-observations)
-  - [Conclusion](#conclusion)
-- [multiGPU Setup](#multigpu-setup)
-  - [Baseline and First Principles](#baseline-and-first-principles)
-  - [Multi‑GPU Distribution and Initial Improvements](#multi-gpu-distribution-and-initial-improvements)
-  - [Profiling](#profiling)
-  - [Batch Sizing](#batch-sizing)
-  - [Overlapping Transfers and Compute & Memory Pooling](#overlapping-transfers-and-compute--memory-pooling)
-  - [Experiment: Triple vs. Double Buffering](#experiment-triple-vs-double-buffering)
-    - [Hypotheses](#hypotheses)
-    - [Measurements](#measurements)
-    - [Hypothesis test summary](#hypothesis-test-summary)
-    - [Conclusion](#conclusion-1)
-  - [Improving Memory Stability](#improving-memory-stability)
-  - [Experiment 2: Memory‑Handling Logic](#experiment-2-memory-handling-logic)
-    - [Hypotheses](#hypotheses-1)
-    - [Measurements](#measurements-1)
-    - [Hypothesis test summary](#hypothesis-test-summary-1)
-    - [Conclusion](#conclusion-2)
-  - [Wrapup and Restoring Vendor Parity](#wrapup-and-restoring-vendor-parity)
-  - [Overlapping Transfers and Compute](#overlapping-transfers-and-compute)
+  - [Variance \& Threats (recap)](#variance--threats-recap)
+  - [Baseline (CPU) Setup](#baseline-cpu-setup)
+  - [Accelerating with Dask](#accelerating-with-dask)
+  - [Accelerating with Numba and CuPy](#accelerating-with-numba-and-cupy)
+    - [Initial Improvement of Baseline](#initial-improvement-of-baseline)
+    - [Transition to CuPy](#transition-to-cupy)
+    - [Profiling and Observations](#profiling-and-observations)
+    - [Conclusion](#conclusion)
+  - [multiGPU Setup](#multigpu-setup)
+    - [Baseline and First Principles](#baseline-and-first-principles)
+    - [Multi‑GPU Distribution and Initial Improvements](#multigpu-distribution-and-initial-improvements)
+    - [Profiling](#profiling)
+    - [Batch Sizing](#batch-sizing)
+    - [Overlapping Transfers and Compute \& Memory Pooling](#overlapping-transfers-and-compute--memory-pooling)
+    - [Experiment: Triple vs. Double Buffering](#experiment-triple-vs-double-buffering)
+      - [Hypotheses](#hypotheses)
+      - [Measurements](#measurements)
+      - [Hypothesis test summary](#hypothesis-test-summary)
+      - [Conclusion](#conclusion-1)
+    - [Improving Memory Stability](#improving-memory-stability)
+    - [Experiment 2: Memory‑Handling Logic](#experiment-2-memoryhandling-logic)
+      - [Hypotheses](#hypotheses-1)
+      - [Measurements](#measurements-1)
+      - [Hypothesis test summary](#hypothesis-test-summary-1)
+      - [Conclusion](#conclusion-2)
+    - [Wrapup and Restoring Vendor Parity](#wrapup-and-restoring-vendor-parity)
+    - [Overlapping Transfers and Compute](#overlapping-transfers-and-compute)
 - [Discussion](#discussion)
   - [Dask](#dask)
   - [Numba/CuPy](#numbacupy)
@@ -55,12 +56,12 @@ HPC Assignment — Accelerating DEMREG
 
 This project accelerates the [DEMREG Python codebase](https://github.com/ianan/demreg) (NumPy‑heavy scientific workload) with a focus on reducing end‑to‑end runtime on realistic solar imagery while preserving correctness and reproducibility. We structure the work as:
 
-1. **Baseline (CPU / NumPy)** — establish wall‑clock reference and profiling on full‑resolution inputs.  
-2. **Dask (CPU orchestration)** — parallelize CPU execution with task scheduling and chunked evaluation on the host; no GPU is used in this path.  
-3. **Single‑GPU (CuPy)** — replace NumPy compute/memory with CuPy and vectorize hot paths for device execution.  
-4. **Multi‑GPU (CuPy + MPI)** — distribute work across multiple GPUs with overlapping host↔device transfers and compute.
+1. **Baseline (CPU / NumPy)**: establish wall‑clock reference and profiling on full‑resolution inputs.  
+2. **Dask (CPU orchestration)**: parallelize CPU execution with task scheduling and chunked evaluation on the host; no GPU is used in this path.  
+3. **Single‑GPU (CuPy)**: replace NumPy compute/memory with CuPy and vectorize hot paths for device execution.  
+4. **Multi‑GPU (CuPy + MPI)**: distribute work across multiple GPUs with overlapping host↔device transfers and compute.
 
-All reported results use a fixed dataset shared across the team for comparability: **10 complete AIA bandsets (6 bands) at 4096×4096** per timestamp, prepared from raw FITS via our scripts and flattened into NumPy stacks. We evaluate each approach on **wall‑time per image**, **throughput (images/s)**, and **speedup vs. the CPU baseline**, and we record the exact hardware and library versions for reproducibility. Subsequent sections provide methodology, implementation notes, and benchmarks following the order above.
+All reported results use a fixed dataset shared across the team for comparability: **10 complete AIA bandsets (6 bands) at 4096×4096** per timestamp, prepared from raw FITS via our scripts and flattened into NumPy stacks. We evaluate each approach on **wall‑time per image**, **throughput (images/s)**, and **speedup vs. the CPU baseline**, and we record the exact hardware and library versions for reproducibility.
 
 
 # Methodology
@@ -79,10 +80,10 @@ Dask dataset utilities expect NPZ files with a `bands` array; builders produce l
 
 ## Hardware & Environment
 All experiments ran on the **FHNW SLURM cluster** (partition: `performance`). Below are the resources requested by each script; actual node models are recorded in run logs.
-- **Baseline (CPU)** — `--cpus-per-task=16`, `--mem=80G`, `--time=02:00:00` (no GPU). Thread caps used: `OMP_NUM_THREADS=16`, `MKL_NUM_THREADS=16`, `OPENBLAS_NUM_THREADS=16`, `NUMEXPR_NUM_THREADS=16`.
-- **Dask (CPU-only)** — `--cpus-per-task=32`, `--mem=96G`, `--time=04:00:00` (no GPU).
-- **Single-GPU (CuPy)** — `--gres=gpu:1`, `--cpus-per-task=2`, `--mem=128G`, `--time=24:00:00`.
-- **Multi-GPU (CuPy+MPI)** — `--nodes=1`, `--ntasks-per-node=4`, `--gpus-per-task=1`, `--cpus-per-task=3`, `--mem=32G`, `--time=24:00:00`, `--hint=nomultithread`.
+- **Baseline (CPU)**: `--cpus-per-task=16`, `--mem=80G`, `--time=02:00:00` (no GPU). Thread caps used: `OMP_NUM_THREADS=16`, `MKL_NUM_THREADS=16`, `OPENBLAS_NUM_THREADS=16`, `NUMEXPR_NUM_THREADS=16`.
+- **Dask (CPU-only)**: `--cpus-per-task=32`, `--mem=96G`, `--time=04:00:00` (no GPU).
+- **Single-GPU (CuPy)**: `--gres=gpu:1`, `--cpus-per-task=2`, `--mem=128G`, `--time=24:00:00`.
+- **Multi-GPU (CuPy+MPI)**: `--nodes=1`, `--ntasks-per-node=4`, `--gpus-per-task=1`, `--cpus-per-task=3`, `--mem=32G`, `--time=24:00:00`, `--hint=nomultithread`.
 (From `slurm_run_baseline.sh`, `slurm_run_Dask.sh`, `slurm_run_singleGPU.sh`, `slurm_run_multiGPU.sh`).
 
 ## Evaluation Metrics
@@ -92,7 +93,7 @@ We report:
 - Optional resource notes: peak memory, GPU utilization via NVML sampler, and Dask task-stream snapshots when relevant (see `src/common/profiling/samplers.py`).
 
 ## Benchmark Protocol
-To ensure apples-to-apples comparisons across all four variants:
+To keep comparisons fair across all four variants:
 1. **Fixed input**: the same NPZ stacks are used for all methods. Baseline and Dask operate on **frame 0**; Single- and Multi-GPU operate on **all 10 frames** unless noted.  
 2. **Common parameters**: default tile size `256×256` and `nµ = 42` unless stated otherwise; controllable via CLI (see `src/dask/cli.py`, `src/dask/main.py`).  
 3. **Repeats and warm-up**: run with repeats ≥1 and, if needed, ignore the first timing if initialization affects iteration 1 (supported by the Dask and single-GPU runners; see `src/dask/runner.py`, `runner.py`).  
@@ -104,7 +105,7 @@ All runs are written to method-specific folders with a run card (Markdown) and m
 
 # Benchmarking Results
 
-**Normalization choice:** Yes. Dask used 32 CPUs vs baseline 16; we report raw wallclocks and normalized views for fairness. Equal-core normalization scales Dask's wallclock by the core ratio (32→16). We also show CPU-seconds (wallclock × CPUs) to reflect total compute budget. GPU methods are reported as raw wallclocks and speedups.
+**Normalization:** Dask used 32 CPUs vs the baseline's 16, so we report both raw wallclocks and normalized views. Equal-core normalization scales Dask's wallclock by the core ratio (32→16). We also show CPU-seconds (wallclock × CPUs) to reflect total compute budget. GPU methods are reported as raw wallclocks and speedups.
 
 ## Raw Wallclocks and Resources
 
@@ -134,7 +135,7 @@ All runs are written to method-specific folders with a run card (Markdown) and m
 - CPU-seconds show that Dask used ~88% of the baseline's total CPU budget while also finishing sooner (more efficient parallel utilization).
 
 ## GPU Methods (context)
-- Single-GPU achieves **62.97×** speedup; Multi-GPU achieves **84.77×** vs baseline on wallclock. These were run on all frames unless noted; CPU paths were restricted to frame 0.
+- Single-GPU achieves **62.97×** speedup; Multi-GPU achieves **76.03×** vs baseline on wallclock. These were run on all frames unless noted; CPU paths were restricted to frame 0.
 
 ## Variance & Threats (recap)
 - Baseline variance: ±20 s (0.9%). Dask and GPU runs listed here are single measurements; add repeats if available.
@@ -212,7 +213,7 @@ The main reasons for this limited performance were:
 - Low GPU utilization (typically <10%) due to small kernels and excessive synchronization  
 - Frequent GPU to CPU memory transfers, negating any acceleration benefits  
 
-In short, while Numba did accelerate the inner loops, the surrounding data movement and control flow dominated runtime.
+While Numba did accelerate the inner loops, the surrounding data movement and control flow dominated runtime.
 
 ### Transition to CuPy
 
@@ -230,8 +231,8 @@ Even when it ran, the computation time was still around 40 minutes per image, an
 To fix this, all Numba kernels were removed and replaced with a pure CuPy implementation.  
 The solver logic including DEM, EDEM, and Chi-squared was fully vectorized and executed using CuPy’s own GPU primitives (built on CUBLAS and CUB).  
 
-This transition simplified memory management, removed kernel launch overheads, and enabled asynchronous CUDA stream–based parallel tile processing.  
-After these changes, the runtime dropped dramatically to ~4.5 minutes per image on a single NVIDIA RTX A4500 GPU.
+This transition simplified memory management, removed kernel launch overheads, and enabled asynchronous CUDA stream-based parallel tile processing.  
+After these changes, the runtime dropped to ~4.5 minutes per image on a single NVIDIA RTX A4500 GPU.
 
 
 ### Profiling and Observations
@@ -258,7 +259,7 @@ In this Section I will describe the multiGPU implementation and the steps taken 
 
 ### Baseline and First Principles
 
-I began with the baseline NumPy implementation that was provided. As a first step, I replaced NumPy with CuPy and vectorized the hot paths to eliminate as many Python loops as possible. This converted the code to being GPU‑friendly. However, when I ran it on SLURM, GPU utilization was only around 14%, and overall it was even slower than the CPU version by a huge margin (9+ hours per image).
+I began with the baseline NumPy implementation that was provided. As a first step, I replaced NumPy with CuPy and vectorized the hot paths to eliminate as many Python loops as possible. This converted the code to being GPU‑friendly. However, when I ran it on SLURM, GPU utilization was only around 14%, and overall it was even slower than the CPU version (9+ hours per image).
 
 To run on the cluster, I created a Singularity container. This took significant time due to numerous dependencies and limited prior experience with Singularity. After matching CuPy and CUDA versions and installing additional libraries to avoid compilation errors, I was able to run the code on the cluster.
 
@@ -271,11 +272,11 @@ This was straightforward to implement and balanced load reasonably well. Alterna
 
 At this point the obvious improvements were exhausted, so it was time to profile. I used NVIDIA Nsight Systems with NVTX annotations for timeline analysis. I profiled each GPU briefly but analyzed one in detail (usually GPU 0), assuming similar behavior. Additionally, I used `nvidia-smi` and `nvtop` on the compute nodes to monitor memory usage and GPU utilization in real time.
 
-This led to two key insights: (1) even with the improvements so far, GPU utilization was still modest (around 30–35%), and (2) there were significant idle gaps between bursts of higher utilization.
+This led to two key insights: (1) even with the improvements so far, GPU utilization was still modest (around 30–35%), and (2) idle gaps appeared between bursts of higher utilization.
 
 ### Batch Sizing
 
-Based on these insights, I implemented the biggest improvement of the project: larger batches. Large batches dramatically increased throughput by minimizing kernel launch and transfer overhead.
+Based on these insights, I implemented the biggest improvement of the project: larger batches. Large batches increased throughput by minimizing kernel launch and transfer overhead.
 I added an adaptive batch‑sizing heuristic: estimate free GPU memory, approximate batch footprint, attempt the largest safe batch, and back off on OOM. This achieved high memory utilization but still wasted time due to OOM retries. About one third of total GPU time in the worst cases. Overall, this brought the time down to about 4 minutes per image.
 
 However, part of this behavior was due to a bug in my kernel logic, where I accidentally applied a term involving dn**2 twice. This made the computational complexity effectively O(n^2) instead of the intended O(n), and increased memory traffic. After fixing this bug (and a similar one affecting write operations), I was able to run with much larger batches, and the time dropped to about 35 seconds per image.
@@ -435,13 +436,12 @@ Although this does not save any compute time, it helps to keep the GPU busy and 
 - Coarser chunking for lower scheduler pressure on big nodes.
 - Pinning to a partition/node class with consistent CPU models.
 - Optional local disk caching for repeated reads of the same stacks.
-Lorem ipsum dolor sit amet, consectetur adipiscing elit. Vivamus lacinia odio vitae vestibulum vestibulum. Cras venenatis euismod malesuada.
 
 ## Numba/CuPy
 
-With the final CuPy-based implementation, the average compute time per image stabilized around 4.5 minutes (compared to the 2+ hours of the baseline)(**ADJUST IF NECESSARY**). GPU utilization reported by `nvidia-smi` typically ranged between 30–50%, which suggests that while memory throughput was good, the computation itself remained somewhat underutilized. This behavior is likely due to the per-tile vectorization strategy, tiles are processed in parallel on the GPU, synchronization points and host–device data transfers still introduce idle periods.
+With the final CuPy-based implementation, the average compute time per image stabilized around 4.5 minutes (compared to the 2+ hours of the baseline). GPU utilization reported by `nvidia-smi` typically ranged between 30–50%, which suggests that while memory throughput was good, the computation itself remained somewhat underutilized. This behavior is likely due to the per-tile vectorization strategy, tiles are processed in parallel on the GPU, synchronization points and host-device data transfers still introduce idle periods.
 
-While the CuPy rewrite significantly improved runtime, it came with trade-offs in memory stability and transparency. Managing GPU memory explicitly (via CuPy’s memory pools) was crucial to prevent OOM errors on large frames. The use of CuPy over Numba proved beneficial: CuPy’s kernels leverage NVIDIA’s optimized CUDA libraries (CUBLAS, CUB), whereas Numba’s JIT-generated kernels, while flexible, introduced context instability when mixed with CuPy operations.
+While the CuPy rewrite improved runtime, it came with trade-offs in memory stability and transparency. Managing GPU memory explicitly (via CuPy’s memory pools) was crucial to prevent OOM errors on large frames. The use of CuPy over Numba proved beneficial: CuPy’s kernels use NVIDIA’s optimized CUDA libraries (CUBLAS, CUB), whereas Numba’s JIT-generated kernels, while flexible, introduced context instability when mixed with CuPy operations.
 
 ### Lessons Learned
 
@@ -469,7 +469,7 @@ I also noticed strong dependence on the server/node. For example, running the fi
 
 1. Profiling reveals what matters. Nsight Systems with NVTX ranges shows behaviors you can’t see otherwise; live monitoring with `nvidia-smi`/`nvtop` helps target future work.
 2. Batch size dominates. The biggest gains came from optimizing batch size. Larger batches amortize overhead and increase throughput but require careful memory management; otherwise, OOM retries waste time.
-3. Overlap matters. Streams and buffering convert idle time into useful work. If you aim for full parallelism (including loading data while computing), beware race conditions and memory pressure. There is still some idle time while loading/saving data; removing it would likely require significantly more parallel I/O work (and Python may not be ideal for that).
+3. Overlap matters. Streams and buffering convert idle time into useful work. If you aim for full parallelism (including loading data while computing), beware race conditions and memory pressure. There is still some idle time while loading/saving data; removing it would likely require more parallel I/O work (and Python may not be ideal for that).
 4. Keep it simple. Many optimizations are possible, but simple changes often yield the largest benefits. I spent time implementing MPI, but batch‑size improvements had a much larger impact. Implementing adaptive batch sizing earlier would have saved time.
 
 ### Future Work
